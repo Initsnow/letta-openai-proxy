@@ -56,7 +56,7 @@ class LettaChatGenerator:
         self.streaming_callback = streaming_callback
         self.request_options = RequestOptions(timeout_in_seconds=300, max_retries=3)
 
-    @component.output_types(replies=List[str], meta=List[Dict[str, Any]])
+    @component.output_types(replies=List[ChatMessage], meta=List[Dict[str, Any]])
     def run(self, prompt: str, agent_id: str, streaming_callback: Optional[Callable[[StreamingChunk], None]] = None, **kwargs):
         """
         Send a query to Letta and return the response.
@@ -77,19 +77,19 @@ class LettaChatGenerator:
             logger.info(f"Connecting to Letta at {self.base_url} with agent {agent_id}")
             client = Letta(base_url=self.base_url, token=token_value)
         except Exception as e:
-            logger.exception(f"Failed to create Letta client: {str(e)}", e)
-            raise ValueError(f"Failed to create Letta client: {str(e)}")
+            logger.exception(f"Failed to create Letta client: {str(e)}")
+            return {"replies": [ChatMessage.from_assistant(f"Failed to create Letta client: {str(e)}")]}
         
         if not agent_id:
-            raise ValueError(f"No Letta agent ID available for {agent_id}!")
+            return {"replies": [ChatMessage.from_assistant(f"No Letta agent ID available for {agent_id}!")]}
 
         try:
             message = self._message_from_user(prompt)
             messages = [message]
             logger.debug(f"Created message: {message}")
         except Exception as e:
-            logger.exception(f"Failed to create message from prompt: {str(e)}", e)
-            raise ValueError(f"Failed to create message: {str(e)}")
+            logger.exception(f"Failed to create message from prompt: {str(e)}")
+            return {"replies": [ChatMessage.from_assistant(f"Failed to create message: {str(e)}")]}
         streaming_callback = select_streaming_callback(self.streaming_callback, streaming_callback, requires_async=False)
 
         completions: List[ChatMessage] = []
@@ -122,10 +122,10 @@ class LettaChatGenerator:
                     assert last_chunk is not None
                     completions = [self._create_message_from_chunks(agent_id, last_chunk, chunks)]
                 except Exception as e:
-                    logger.exception(f"An error occurred while processing a streaming response: {str(e)}", e)
+                    logger.exception(f"An error occurred while processing a streaming response: {str(e)}")
                     completions = [ChatMessage.from_assistant(f"An error occurred while streaming response: {str(e)}")]
             except Exception as e:
-                logger.exception(f"Failed to create Letta stream for agent {agent_id}: {str(e)}", e)
+                logger.exception(f"Failed to create Letta stream for agent {agent_id}: {str(e)}")
                 completions = [ChatMessage.from_assistant(f"Failed to create stream: {str(e)}")]
 
         else:
@@ -137,7 +137,7 @@ class LettaChatGenerator:
                 )
                 completions = [self._build_message(agent_id, completion)]
             except Exception as e:
-                logger.exception(f"An error occurred while processing a response: {str(e)}", e)
+                logger.exception(f"An error occurred while processing a response: {str(e)}")
                 completions = [ChatMessage.from_assistant(f"An error occurred while waiting for response: {str(e)}")]
 
         # logger.debug(f"run: completions={completions}")
