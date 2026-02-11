@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 from haystack import component
 from haystack.dataclasses import ChatMessage, StreamingChunk, select_streaming_callback
 from haystack.utils import Secret
-from letta_client import Letta, MessageCreate, TextContent
+from letta_client import Letta, MessageCreate, TextContent, ImageContent
 from letta_client.agents.messages.types.letta_streaming_response import LettaStreamingResponse
 from letta_client.core import RequestOptions
 from letta_client.types.assistant_message import AssistantMessage
@@ -57,7 +57,7 @@ class LettaChatGenerator:
         self.request_options = RequestOptions(timeout_in_seconds=300, max_retries=3)
 
     @component.output_types(replies=List[ChatMessage], meta=List[Dict[str, Any]])
-    def run(self, prompt: str, agent_id: str, streaming_callback: Optional[Callable[[StreamingChunk], None]] = None, **kwargs):
+    def run(self, prompt: Union[str, List], agent_id: str, streaming_callback: Optional[Callable[[StreamingChunk], None]] = None, **kwargs):
         """
         Send a query to Letta and return the response.
 
@@ -145,8 +145,56 @@ class LettaChatGenerator:
         return {"replies": completions}
 
     @staticmethod
-    def _message_from_user(prompt: str) -> MessageCreate:
-        return MessageCreate(role="user", content=[TextContent(text=prompt)])
+    def _message_from_user(prompt: Union[str, List]) -> MessageCreate:
+        if isinstance(prompt, str):
+            return MessageCreate(role="user", content=[TextContent(text=prompt)])
+        
+        content_parts = []
+        for part in prompt:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type == "text":
+                    content_parts.append(TextContent(text=part.get("text", "")))
+                elif part_type == "image_url":
+                    # OpenAI format: {"type": "image_url", "image_url": {"url": "..."}}
+                    image_url = part.get("image_url", {}).get("url", "")
+                    if image_url.startswith("data:"):
+                        # Base64 data URI
+                        # Format: data:image/jpeg;base64,...
+                        try:
+                            header, data = image_url.split(",", 1)
+                            media_type = header.split(":", 1)[1].split(";", 1)[0]
+                            content_parts.append(ImageContent(
+                                type="image", 
+                                source={
+                                    "type": "base64", 
+                                    "media_type": media_type, 
+                                    "data": data
+                                }
+                            ))
+                        except Exception as e:
+                            logger.warning(f"Failed to parse base64 image URL: {e}")
+                    else:
+                        # Standard URL
+                        content_parts.append(ImageContent(
+                            type="image", 
+                            source={"type": "url", "url": image_url}
+                        ))
+                elif part_type == "image":
+                    # Letta format pass-through (if source structure matches)
+                    # We assume it matches Letta's expected dict structure or is convertible
+                    # Since ImageContent expects specific fields, let's try to adapt or pass generic dict if needed
+                    # But Letta client likely expects objects.
+                    # The user provided: {"type": "image", "source": {...}}
+                    if "source" in part:
+                         content_parts.append(ImageContent(
+                            type="image", 
+                            source=part["source"]
+                        ))
+                else:
+                    logger.warning(f"Unknown content part type: {part_type}")
+        
+        return MessageCreate(role="user", content=content_parts)
 
     def _create_message_from_chunks(self, agent_id, completion_chunk, streamed_chunks: List[StreamingChunk]) -> ChatMessage:
         """
