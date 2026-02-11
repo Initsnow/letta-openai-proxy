@@ -37,22 +37,20 @@ def configure_logging():
     ]
 
     # Specific processors for structlog
+    # IMPORTANT: We must NOT render to string/json here if we are passing to stdlib logging!
+    # Instead, we wrap the event dict for the ProcessorFormatter to handle.
+    processors = shared_processors + [
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter
+    ]
+
     if use_json:
-        # JSON rendering
-        processors = shared_processors + [
-            structlog.processors.JSONRenderer()
-        ]
         # For stdlib, we need a formatter that outputs JSON
-        # effectively, we'll just use structlog's ProcessorFormatter
         formatter = structlog.stdlib.ProcessorFormatter(
             processor=structlog.processors.JSONRenderer(),
             foreign_pre_chain=shared_processors,
         )
     else:
         # Console rendering (pretty)
-        processors = shared_processors + [
-            structlog.dev.ConsoleRenderer()
-        ]
         formatter = structlog.stdlib.ProcessorFormatter(
             processor=structlog.dev.ConsoleRenderer(),
             foreign_pre_chain=shared_processors,
