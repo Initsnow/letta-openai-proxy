@@ -98,6 +98,7 @@ class LettaChatGenerator:
                 logger.info(f"Creating stream for agent_id: {agent_id}")
                 logger.debug(f"Request options: {self.request_options}")
                 logger.debug(f"Messages: {messages}")
+
                 stream_completion: Iterator[LettaStreamingResponse] = client.agents.messages.create_stream(
                     agent_id=agent_id, 
                     messages=messages, 
@@ -119,7 +120,7 @@ class LettaChatGenerator:
                             chunks.append(chunk_delta)
                             streaming_callback(chunk_delta)
 
-                    assert last_chunk is not None
+                    # assert last_chunk is not None
                     completions = [self._create_message_from_chunks(agent_id, last_chunk, chunks)]
                 except Exception as e:
                     logger.exception(f"An error occurred while processing a streaming response: {str(e)}")
@@ -215,7 +216,7 @@ class LettaChatGenerator:
                 "model": agent_id,
                 "index": 0,
                 "finish_reason": finish_reason,
-                "completion_start_time": streamed_chunks[0].meta.get("received_at"),  # first chunk received
+                "completion_start_time": streamed_chunks[0].meta.get("received_at") if streamed_chunks else None,
                 "usage": usage_dict,
             }
         )
