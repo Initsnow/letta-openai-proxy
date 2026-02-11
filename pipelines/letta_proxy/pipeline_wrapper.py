@@ -1,7 +1,8 @@
 from typing import Generator, List, Union
 
 from hayhooks import BasePipelineWrapper, get_last_user_message, streaming_generator
-from hayhooks import log as logger
+import structlog
+logger = structlog.get_logger()
 from haystack import Pipeline
 
 import os
