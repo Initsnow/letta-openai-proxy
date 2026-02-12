@@ -11,10 +11,18 @@ from fastapi.routing import APIRoute
 from hayhooks import BasePipelineWrapper, create_app
 from hayhooks.server.pipelines import registry
 from hayhooks.server.routers import openai as openai_module_to_patch
-from hayhooks.server.routers.openai import ChatCompletion, ChatRequest, Choice, Message, ModelObject, ModelsResponse
-from hayhooks.settings import settings
-from haystack import tracing
+from haystack.dataclasses import StreamingChunk
 from haystack.tracing.logging_tracer import LoggingTracer
+from haystack.tracing.tracer import enable_tracing, tracer
+from hayhooks.server.routers.openai import (
+    ChatCompletion,
+    ChatRequest,
+    Choice,
+    Message,
+    ModelObject,
+    ModelsResponse,
+)
+from hayhooks.settings import settings
 from letta_client import Letta
 import structlog
 from logging_config import configure_logging
@@ -26,8 +34,8 @@ logger = structlog.get_logger()
 
 # Optional: Enable Haystack content tracing if DEBUG level is set or explicit env var
 if os.getenv("HAYSTACK_CONTENT_TRACING", "false").lower() == "true":
-    tracing.tracer.is_content_tracing_enabled = True
-    tracing.enable_tracing(
+    tracer.is_content_tracing_enabled = True
+    enable_tracing(
         LoggingTracer(
             tags_color_strings={
                 "haystack.component.input": "\x1b[1;31m",
@@ -46,15 +54,21 @@ def fetch_letta_models():
     try:
         effective_token = LETTA_API_TOKEN if LETTA_API_TOKEN else None
         # Initialize the Letta client
-        client = Letta(base_url=LETTA_BASE_URL, token=effective_token)
+        client = Letta(base_url=LETTA_BASE_URL, api_key=effective_token)
 
         # Get the list of agents
         agents = client.agents.list()
 
         # Filter out agents with names ending in "sleeptime"
-        return [{"id": agent.id, "name": agent.name} for agent in agents if not agent.name.endswith("sleeptime")]
+        return [
+            {"id": agent.id, "name": agent.name}
+            for agent in agents
+            if not agent.name.endswith("sleeptime")
+        ]
     except Exception as e:
-        logger.error(f"Unexpected error when fetching agents from Letta: {e}", exc_info=True)
+        logger.error(
+            f"Unexpected error when fetching agents from Letta: {e}", exc_info=True
+        )
         return []
 
 
@@ -88,27 +102,45 @@ for route_idx, route in enumerate(openai_module_to_patch.router.routes):
         route.endpoint = get_models_override
 
 
-async def chat_completions_override(chat_req: ChatRequest) -> Union[ChatCompletion, StreamingResponse]:
+async def chat_completions_override(
+    chat_req: ChatRequest,
+) -> Union[ChatCompletion, StreamingResponse]:
     # Get the letta_proxy pipeline wrapper
     # Assuming 'letta_proxy' is the registered name of your pipeline
     pipeline_wrapper = registry.get("letta_proxy")
 
     if not pipeline_wrapper:
         logger.error("Pipeline 'letta_proxy' not found in registry.")
-        raise HTTPException(status_code=500, detail="Chat backend pipeline 'letta_proxy' not found.")
+        raise HTTPException(
+            status_code=500, detail="Chat backend pipeline 'letta_proxy' not found."
+        )
 
     if not isinstance(pipeline_wrapper, BasePipelineWrapper):
-        logger.error(f"Retrieved 'letta_proxy' is not a BasePipelineWrapper instance. Type: {type(pipeline_wrapper)}")
-        raise HTTPException(status_code=500, detail="Chat backend pipeline 'letta_proxy' is of an unexpected type.")
+        logger.error(
+            f"Retrieved 'letta_proxy' is not a BasePipelineWrapper instance. Type: {type(pipeline_wrapper)}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Chat backend pipeline 'letta_proxy' is of an unexpected type.",
+        )
 
-    if not pipeline_wrapper._is_run_chat_completion_implemented:  # Now Pylance should be happier after isinstance
-        logger.error(f"Pipeline 'letta_proxy' (type: {type(pipeline_wrapper)}) does not implement run_chat_completion.")
-        raise HTTPException(status_code=501, detail="Chat completions endpoint not implemented for 'letta_proxy' model.")
+    if (
+        not pipeline_wrapper._is_run_chat_completion_implemented
+    ):  # Now Pylance should be happier after isinstance
+        logger.error(
+            f"Pipeline 'letta_proxy' (type: {type(pipeline_wrapper)}) does not implement run_chat_completion."
+        )
+        raise HTTPException(
+            status_code=501,
+            detail="Chat completions endpoint not implemented for 'letta_proxy' model.",
+        )
 
     request_body_dump = chat_req.model_dump()
     if "agent_id" not in request_body_dump:
         request_body_dump["agent_id"] = chat_req.model
-        logger.info(f"Injected agent_id='{chat_req.model}' into request_body_dump for letta_proxy.")
+        logger.info(
+            f"Injected agent_id='{chat_req.model}' into request_body_dump for letta_proxy."
+        )
 
     try:
         result_generator = await run_in_threadpool(
@@ -121,24 +153,46 @@ async def chat_completions_override(chat_req: ChatRequest) -> Union[ChatCompleti
         logger.error(f"ValueError in letta_proxy.run_chat_completion: {ve}")
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        logger.error(f"Exception calling letta_proxy.run_chat_completion: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error processing chat request with letta_proxy.")
+        logger.error(
+            f"Exception calling letta_proxy.run_chat_completion: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=500, detail="Error processing chat request with letta_proxy."
+        )
 
     resp_id = f"chatcmpl-{uuid.uuid4()}"  # OpenAI compatible ID
 
     def stream_chunks() -> Generator[str, None, None]:
         try:
             for chunk_content in result_generator:
-                if not isinstance(chunk_content, str):
-                    logger.warning(f"letta_proxy returned non-string chunk: {type(chunk_content)}. Converting to str.")
-                    chunk_content = str(chunk_content)
+                tool_calls = None
+                content = ""
+
+                if isinstance(chunk_content, StreamingChunk):
+                    content = chunk_content.content
+                    if "tool_calls" in chunk_content.meta:
+                        tool_calls = chunk_content.meta["tool_calls"]
+                elif isinstance(chunk_content, str):
+                    content = chunk_content
+                else:
+                    logger.warning(
+                        f"letta_proxy returned non-string chunk: {type(chunk_content)}. Converting to str."
+                    )
+                    content = str(chunk_content)
+
+                # Construct Message arguments
+                msg_args = {"role": "assistant"}
+                if content:
+                    msg_args["content"] = content
+                if tool_calls:
+                    msg_args["tool_calls"] = tool_calls
 
                 chunk_resp = ChatCompletion(
                     id=resp_id,
                     object="chat.completion.chunk",
                     created=int(time.time()),
                     model=chat_req.model,
-                    choices=[Choice(index=0, delta=Message(role="assistant", content=chunk_content))],
+                    choices=[Choice(index=0, delta=Message(**msg_args))],  # pyright: ignore[reportArgumentType]
                 )
                 yield f"data: {chunk_resp.model_dump_json()}\n\n"
 
@@ -147,7 +201,13 @@ async def chat_completions_override(chat_req: ChatRequest) -> Union[ChatCompleti
                 object="chat.completion.chunk",
                 created=int(time.time()),
                 model=chat_req.model,
-                choices=[Choice(index=0, delta=Message(role="assistant", content=""), finish_reason="stop")],
+                choices=[
+                    Choice(
+                        index=0,
+                        delta=Message(role="assistant", content=""),  # pyright: ignore[reportArgumentType]
+                        finish_reason="stop",
+                    )
+                ],
             )
             yield f"data: {final_chunk.model_dump_json()}\n\n"
         except Exception as e:
@@ -158,7 +218,13 @@ async def chat_completions_override(chat_req: ChatRequest) -> Union[ChatCompleti
                 object="chat.completion.chunk",
                 created=int(time.time()),
                 model=chat_req.model,
-                choices=[Choice(index=0, delta=Message(role="assistant", content=error_chunk_content), finish_reason="stop")],
+                choices=[
+                    Choice(
+                        index=0,
+                        delta=Message(role="assistant", content=error_chunk_content),  # pyright: ignore[reportArgumentType]
+                        finish_reason="stop",
+                    )
+                ],
             )
             yield f"data: {error_resp.model_dump_json()}\n\n"
 
@@ -167,12 +233,18 @@ async def chat_completions_override(chat_req: ChatRequest) -> Union[ChatCompleti
         return StreamingResponse(stream_chunks(), media_type="text/event-stream")
     else:
         # Non-streaming: collect all chunks and return a single ChatCompletion
-        logger.info(f"Returning non-streaming ChatCompletion for model {chat_req.model}")
+        logger.info(
+            f"Returning non-streaming ChatCompletion for model {chat_req.model}"
+        )
         full_response_content = ""
         try:
             for chunk_content in result_generator:
-                if not isinstance(chunk_content, str):
-                    logger.warning(f"letta_proxy returned non-string chunk (non-streaming): {type(chunk_content)}. Converting to str.")
+                if isinstance(chunk_content, StreamingChunk):
+                    chunk_content = chunk_content.content
+                elif not isinstance(chunk_content, str):
+                    logger.warning(
+                        f"letta_proxy returned non-string chunk (non-streaming): {type(chunk_content)}. Converting to str."
+                    )
                     chunk_content = str(chunk_content)
                 full_response_content += chunk_content
 
@@ -181,19 +253,34 @@ async def chat_completions_override(chat_req: ChatRequest) -> Union[ChatCompleti
                 object="chat.completion",
                 created=int(time.time()),
                 model=chat_req.model,
-                choices=[Choice(index=0, message=Message(role="assistant", content=full_response_content), finish_reason="stop")],
+                choices=[
+                    Choice(
+                        index=0,
+                        message=Message(  # pyright: ignore[reportArgumentType]
+                            role="assistant", content=full_response_content
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
             )
             return final_resp
         except Exception as e:
-            logger.error(f"Error during non-streaming from letta_proxy: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Error collecting stream from letta_proxy: {e}")
+            logger.error(
+                f"Error during non-streaming from letta_proxy: {e}", exc_info=True
+            )
+            raise HTTPException(
+                status_code=500, detail=f"Error collecting stream from letta_proxy: {e}"
+            )
 
 
 for route_idx, route in enumerate(openai_module_to_patch.router.routes):
     if isinstance(route, APIRoute):
         if route.path in ["/models", "/v1/models"]:
             route.endpoint = get_models_override
-        elif route.path in ["/chat/completions", "/v1/chat/completions"] or route.operation_id == "chat_completions":  # covers /{pipeline_name}/chat
+        elif (
+            route.path in ["/chat/completions", "/v1/chat/completions"]
+            or route.operation_id == "chat_completions"
+        ):  # covers /{pipeline_name}/chat
             route.endpoint = chat_completions_override
 
 hayhooks = create_app()
