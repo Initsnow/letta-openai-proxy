@@ -19,6 +19,7 @@ from letta_client.types.agents import (
     TextContentParam,
     ToolCallMessage,
     Message as LettaMessageUnion,
+    ApprovalRequestMessage,
 )
 from letta_client.types.agents.approval_create_param import ApprovalCreateParam
 from letta_client.types.agents.message_create_params import (
@@ -410,14 +411,23 @@ class LettaChatGenerator:
             content = f"\n- {display_time} {reasoning}"
             return StreamingChunk(content=content_prefix + content, meta=meta_dict)
 
-        if isinstance(chunk, ToolCallMessage):
-            tool_call_message: ToolCallMessage = chunk
+        if isinstance(chunk, (ToolCallMessage, ApprovalRequestMessage)):
+            # Both ToolCallMessage and ApprovalRequestMessage contain a tool_call object
+            tool_call = chunk.tool_call
+
             now = datetime.now()
             display_time = now.astimezone().time().isoformat("seconds")
             meta_dict = {"type": "assistant", "received_at": now.isoformat()}
-            tool_name = tool_call_message.tool_call.name
-            call_statement = f"Calling tool {tool_name}"
-            arguments: str = tool_call_message.tool_call.arguments or "{}"
+            tool_name = tool_call.name
+
+            call_type = (
+                "Requesting approval for tool"
+                if isinstance(chunk, ApprovalRequestMessage)
+                else "Calling tool"
+            )
+            call_statement = f"{call_type} {tool_name}"
+
+            arguments: str = tool_call.arguments or "{}"
 
             no_heartbeat_requested = """"request_heartbeat": false""" in arguments
             if no_heartbeat_requested:
@@ -434,14 +444,16 @@ class LettaChatGenerator:
             # we can send it as a single chunk.
 
             tool_call_payload = {
-                "id": tool_call_message.tool_call.tool_call_id,
+                "id": tool_call.tool_call_id,
                 "type": "function",
                 "function": {
-                    "name": tool_call_message.tool_call.name,
-                    "arguments": tool_call_message.tool_call.arguments,
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
                 },
             }
-            logger.debug(f"constructed tool_call_payload: {tool_call_payload}")
+            logger.debug(
+                f"constructed tool_call_payload from {type(chunk).__name__}: {tool_call_payload}"
+            )
 
             # We use the 'meta' field to pass this structured data back to the pipeline runner (app.py)
             meta_dict["tool_calls"] = [tool_call_payload]  # type: ignore[assignment]
