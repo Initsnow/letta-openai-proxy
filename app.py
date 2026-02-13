@@ -263,9 +263,15 @@ async def chat_completions_override(
 
             if tool_calls:
                 msg_args["tool_calls"] = tool_calls
+                logger.info(f"Including tool_calls in final response: {tool_calls}")
 
             # Use model_construct to bypass validation for "content" being None or strict literals
             message = Message.model_construct(**msg_args)  # type: ignore
+
+            if not tool_calls and not full_response_content:
+                logger.warning(
+                    "Sending empty content and no tool calls. This might confuse the client."
+                )
 
             # Use model_construct for Choice as well to allow "tool_calls" finish reason
             choice = Choice.model_construct(
@@ -280,6 +286,9 @@ async def chat_completions_override(
                 created=int(time.time()),
                 model=chat_req.model,
                 choices=[choice],
+            )
+            logger.debug(
+                f"Final ChatCompletion Response: {final_resp.model_dump_json()}"
             )
             return final_resp
         except Exception as e:

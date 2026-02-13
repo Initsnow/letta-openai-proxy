@@ -434,7 +434,6 @@ class LettaChatGenerator:
             # we can send it as a single chunk.
 
             tool_call_payload = {
-                "index": 0,
                 "id": tool_call_message.tool_call.tool_call_id,
                 "type": "function",
                 "function": {
@@ -442,6 +441,7 @@ class LettaChatGenerator:
                     "arguments": tool_call_message.tool_call.arguments,
                 },
             }
+            logger.debug(f"constructed tool_call_payload: {tool_call_payload}")
 
             # We use the 'meta' field to pass this structured data back to the pipeline runner (app.py)
             meta_dict["tool_calls"] = [tool_call_payload]  # type: ignore[assignment]
