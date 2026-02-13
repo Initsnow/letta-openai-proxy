@@ -2,6 +2,7 @@ import os
 from datetime import datetime
 from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Union
 
+
 import structlog
 from haystack import Pipeline, component
 from haystack.dataclasses import ChatMessage, StreamingChunk, select_streaming_callback
@@ -63,7 +64,12 @@ class LettaChatGenerator:
         # Don't allow any OpenAI generation kwargs for now.
         self.generation_kwargs = {}
         self.streaming_callback = streaming_callback
+        self.generation_kwargs = {}
+        self.streaming_callback = streaming_callback
         self.request_options: Dict[str, Any] = {"timeout": 300, "max_retries": 3}
+        self.passthrough_tools = (
+            os.getenv("LETTA_PASSTHROUGH_TOOLS", "true").lower() == "true"
+        )
 
     @component.output_types(replies=List[ChatMessage], meta=List[Dict[str, Any]])
     def run(
@@ -158,10 +164,6 @@ class LettaChatGenerator:
                     )
                 )
 
-                meta_dict: Dict[str, Any] = {
-                    "type": "assistant",
-                    "received_at": datetime.now().isoformat(),
-                }
                 chunks = []
                 self.think_block_open = False
                 last_chunk = None
@@ -231,6 +233,12 @@ class LettaChatGenerator:
         OpenAI format: {"type": "function", "function": {"name": "...", "description": "...", "parameters": ...}}
         Letta client_tools format expected by SDK: [{"name": "...", "description": "...", "parameters": ...}, ...]
         """
+        if not self.passthrough_tools:
+            logger.debug(
+                "LETTA_PASSTHROUGH_TOOLS is false, ignoring client provided tools."
+            )
+            return []
+
         client_tools: List[ClientTool] = []
         for tool in tools:
             if tool.get("type") == "function":
@@ -494,7 +502,31 @@ class LettaChatGenerator:
                 else:
                     content_str = message.content
                 chat_message = ChatMessage.from_assistant(content_str)
-                break
+            elif isinstance(message, ToolCallMessage):
+                # Handle ToolCallMessage for non-streaming response
+                # We need to construct a ChatMessage that contains the tool calls in its meta
+                tool_call = message.tool_call
+
+                # Create the tool call payload compatible with OpenAI
+                tool_call_payload = {
+                    "index": 0,
+                    "id": tool_call.tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    },
+                }
+
+                # If we don't have a chat_message yet (likely), create one with empty content
+                if not chat_message:
+                    chat_message = ChatMessage.from_assistant("")
+
+                # Initialize or append to tool_calls in meta
+                if "tool_calls" not in chat_message.meta:
+                    chat_message.meta["tool_calls"] = []
+
+                chat_message.meta["tool_calls"].append(tool_call_payload)
 
         if not chat_message:
             chat_message = ChatMessage.from_assistant("No message found")
@@ -503,7 +535,9 @@ class LettaChatGenerator:
             {
                 "model": agent_id,
                 "index": 0,
-                "finish_reason": "stop",
+                "finish_reason": "tool_calls"
+                if "tool_calls" in chat_message.meta
+                else "stop",
                 "usage": usage_dict,
             }
         )

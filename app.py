@@ -1,7 +1,7 @@
 import os
 import time
 import uuid
-from typing import Generator, Union
+from typing import Any, Dict, Generator, Union
 
 import uvicorn
 from fastapi import HTTPException
@@ -238,8 +238,12 @@ async def chat_completions_override(
         )
         full_response_content = ""
         try:
+            tool_calls = []
             for chunk_content in result_generator:
                 if isinstance(chunk_content, StreamingChunk):
+                    # Check for tool_calls in meta
+                    if "tool_calls" in chunk_content.meta:
+                        tool_calls.extend(chunk_content.meta["tool_calls"])
                     chunk_content = chunk_content.content
                 elif not isinstance(chunk_content, str):
                     logger.warning(
@@ -248,20 +252,34 @@ async def chat_completions_override(
                     chunk_content = str(chunk_content)
                 full_response_content += chunk_content
 
+            # Check if we have tool calls
+            msg_args: Dict[str, Any] = {"role": "assistant"}
+            if full_response_content:
+                msg_args["content"] = full_response_content
+            else:
+                # If no content but tool calls, content should probably be null or empty string depending on client expectation.
+                # OpenAI usually sends null content with tool calls.
+                msg_args["content"] = None
+
+            if tool_calls:
+                msg_args["tool_calls"] = tool_calls
+
+            # Use model_construct to bypass validation for "content" being None or strict literals
+            message = Message.model_construct(**msg_args)  # type: ignore
+
+            # Use model_construct for Choice as well to allow "tool_calls" finish reason
+            choice = Choice.model_construct(
+                index=0,
+                message=message,
+                finish_reason="tool_calls" if tool_calls else "stop",  # type: ignore
+            )
+
             final_resp = ChatCompletion(
                 id=resp_id,
                 object="chat.completion",
                 created=int(time.time()),
                 model=chat_req.model,
-                choices=[
-                    Choice(
-                        index=0,
-                        message=Message(  # pyright: ignore[reportArgumentType]
-                            role="assistant", content=full_response_content
-                        ),
-                        finish_reason="stop",
-                    )
-                ],
+                choices=[choice],
             )
             return final_resp
         except Exception as e:
