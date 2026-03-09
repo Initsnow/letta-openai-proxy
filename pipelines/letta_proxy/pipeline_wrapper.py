@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Union
 
 
-import structlog
+from loguru import logger
 from haystack import Pipeline, component
 from haystack.dataclasses import ChatMessage, StreamingChunk, select_streaming_callback
 from haystack.utils import Secret
@@ -28,8 +28,6 @@ from letta_client.types.agents.message_create_params import (
 )
 from letta_client.types.agents.letta_response import Usage
 from letta_client.types.agents.letta_streaming_response import LettaUsageStatistics
-
-logger = structlog.get_logger()
 
 
 @component

@@ -1,75 +1,62 @@
 import logging
 import os
-import structlog
+import sys
+
+from loguru import logger
 
 
-def configure_logging():
+class _InterceptHandler(logging.Handler):
+    """Route all stdlib logging records (uvicorn, httpx, haystack...) into loguru."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno  # type: ignore[assignment]
+
+        frame, depth = sys._getframe(6), 6
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back  # type: ignore[assignment]
+            depth += 1
+
+        logger.opt(depth=depth, exception=record.exc_info).log(
+            level, record.getMessage()
+        )
+
+
+def configure_logging() -> None:
     """
-    Configures logging for the application using structlog.
-    Respects LOG_LEVEL and HAYSTACK_LOGGING_USE_JSON environment variables.
+    Configure loguru as the single logging backend for the whole application.
+
+    - Reads LOG env var (default INFO) — same var hayhooks reads.
+    - Re-routes all stdlib logging (uvicorn, httpx, haystack…) through loguru
+      via InterceptHandler so everything appears in one unified stream.
+    - Idempotent: safe to call multiple times.
     """
-    log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
-    use_json = os.getenv("HAYSTACK_LOGGING_USE_JSON", "false").lower() == "true"
+    log_level = os.getenv("LOG", "INFO").upper()
 
-    try:
-        log_level = getattr(logging, log_level_name)
-    except AttributeError:
-        log_level = logging.INFO
+    # Remove hayhooks' default sink and ours if re-called
+    logger.remove()
 
-    # 1. Configure Standard Library Logging
-    # We want standard logging (used by libraries) to be captured by structlog
-
-    # Shared processors for both structlog and stdlib
-    shared_processors = [
-        structlog.contextvars.merge_contextvars,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.TimeStamper(fmt="iso"),
-    ]
-
-    # Specific processors for structlog
-    # IMPORTANT: We must NOT render to string/json here if we are passing to stdlib logging!
-    # Instead, we wrap the event dict for the ProcessorFormatter to handle.
-    processors = shared_processors + [
-        structlog.stdlib.ProcessorFormatter.wrap_for_formatter
-    ]
-
+    use_json = os.getenv("LOG_JSON", "false").lower() == "true"
     if use_json:
-        # For stdlib, we need a formatter that outputs JSON
-        formatter = structlog.stdlib.ProcessorFormatter(
-            processor=structlog.processors.JSONRenderer(),
-            foreign_pre_chain=shared_processors,
-        )
+        logger.add(sys.stderr, level=log_level, serialize=True)
     else:
-        # Console rendering (pretty)
-        formatter = structlog.stdlib.ProcessorFormatter(
-            processor=structlog.dev.ConsoleRenderer(),
-            foreign_pre_chain=shared_processors,
+        logger.add(
+            sys.stderr,
+            level=log_level,
+            colorize=True,
+            format=(
+                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+                "<level>{level: <8}</level> | "
+                "<cyan>{name}</cyan>:<cyan>{line}</cyan> | "
+                "<level>{message}</level>"
+            ),
         )
 
-    structlog.configure(
-        processors=processors,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
-    )
+    # Intercept stdlib logging so uvicorn / httpx / haystack go through loguru
+    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"):
+        logging.getLogger(name).handlers = [_InterceptHandler()]
 
-    # BUG-11: First remove any existing handlers to avoid duplicate log output,
-    # then add our configured handler.
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-    for h in root_logger.handlers[:]:
-        root_logger.removeHandler(h)
-    root_logger.addHandler(handler)
-
-    # Set levels for specific noisy libraries if needed
-    # logging.getLogger("httpx").setLevel(logging.WARNING)
-
-    # Log that logging is configured
-    logger = structlog.get_logger()
-    logger.info("Logging configured", level=log_level_name, json_mode=use_json)
+    logger.info("Logging configured", level=log_level, json=use_json)

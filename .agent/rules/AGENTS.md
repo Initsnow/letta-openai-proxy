@@ -24,8 +24,8 @@ This file provides guidance to Antigravity (and other AI coding agents) when wor
 | `LETTA_API_TOKEN` | _(empty)_ | Bearer token for Letta |
 | `LETTA_PASSTHROUGH_TOOLS` | `true` | Forward OpenAI tools to Letta |
 | `LETTA_CHAT_DEBUG_TOOL_STATEMENTS` | `false` | Log full tool call arguments |
-| `LOG_LEVEL` | `INFO` | Logging level |
-| `HAYSTACK_LOGGING_USE_JSON` | `false` | JSON vs pretty log output |
+| `LOG` | `INFO` | Log level for all output (hayhooks + our code share this) |
+| `LOG_JSON` | `false` | Output logs as JSON instead of pretty console |
 | `HAYSTACK_CONTENT_TRACING` | `false` | Enable Haystack content tracing |
 
 ## Development Commands

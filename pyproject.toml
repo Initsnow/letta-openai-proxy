@@ -12,7 +12,6 @@ dependencies = [
     "click-repl>=0.3.0",
     "prompt-toolkit>=3.0.36",
     "rich>=13.0.0",
-    "structlog>=24.1.0",
 ]
 
 [dependency-groups]

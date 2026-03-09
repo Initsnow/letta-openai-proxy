@@ -24,12 +24,11 @@ from hayhooks.server.routers.openai import (
 )
 from hayhooks.settings import settings
 from letta_client import Letta
-import structlog
+from loguru import logger
 from logging_config import configure_logging
 
 # Configure logging immediately
 configure_logging()
-logger = structlog.get_logger()
 
 
 # Optional: Enable Haystack content tracing if DEBUG level is set or explicit env var
@@ -304,5 +303,15 @@ for route_idx, route in enumerate(openai_module_to_patch.router.routes):
 hayhooks = create_app()
 
 if __name__ == "__main__":
-    # Run the combined Hayhooks + MCP server
-    uvicorn.run("app:hayhooks", host=settings.host, port=settings.port)
+    import os as _os
+
+    _log_level = _os.getenv("LOG_LEVEL", "INFO").lower()
+    # log_config=None: prevent uvicorn from calling dictConfig() which would
+    # override our logging setup. log_level keeps uvicorn's own output in sync.
+    uvicorn.run(
+        "app:hayhooks",
+        host=settings.host,
+        port=settings.port,
+        log_config=None,
+        log_level=_log_level,
+    )
