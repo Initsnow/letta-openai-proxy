@@ -50,27 +50,23 @@ class LettaChatGenerator:
         """
         Initialize the component with a Letta client.
 
-        :param agent_id: The ID of the Letta agent to use for text generation.
         :param base_url: The base URL of the Letta instance.
         :param token: The token to use as HTTP bearer authorization for Letta.
         :param generation_kwargs: A dictionary with keyword arguments to customize text generation.
         :param streaming_callback: An optional callable for handling streaming responses.
         """
-
         logger.info(f"Using Letta base URL: {base_url}")
         self.base_url = base_url
         self.token = token
-        self.send_end_think = False
-        self.think_block_open = False
         # Don't allow any OpenAI generation kwargs for now.
-        self.generation_kwargs = {}
-        self.streaming_callback = streaming_callback
         self.generation_kwargs = {}
         self.streaming_callback = streaming_callback
         self.request_options: Dict[str, Any] = {"timeout": 300, "max_retries": 3}
         self.passthrough_tools = (
             os.getenv("LETTA_PASSTHROUGH_TOOLS", "true").lower() == "true"
         )
+        # OPT-1: Cache the Letta client to avoid recreating it on every request.
+        self._client: Optional[Letta] = None
 
     @component.output_types(replies=List[ChatMessage], meta=List[Dict[str, Any]])
     def run(
@@ -99,9 +95,13 @@ class LettaChatGenerator:
             logger.warning(f"Received unexpected kwargs: {kwargs}")
 
         try:
-            token_value = None if self.token is None else self.token.resolve_value()
+            # OPT-1: Reuse the cached client; create one only if needed.
+            if self._client is None:
+                token_value = None if self.token is None else self.token.resolve_value()
+                logger.info(f"Creating Letta client at {self.base_url}")
+                self._client = Letta(base_url=self.base_url, api_key=token_value)
+            client = self._client
             logger.info(f"Connecting to Letta at {self.base_url} with agent {agent_id}")
-            client = Letta(base_url=self.base_url, api_key=token_value)
         except Exception as e:
             logger.exception(f"Failed to create Letta client: {str(e)}")
             return {
@@ -127,8 +127,11 @@ class LettaChatGenerator:
             if approval_message:
                 # If we have an approval message (tool results), we use that instead of a new user message
                 messages: List[LettaCreateMessage] = [approval_message]
+                # OPT-2: ApprovalCreateParam is a TypedDict, use bracket notation not attribute
+                _approvals = approval_message.get("approvals") or []
+                num_approvals = len(list(_approvals))
                 logger.debug(
-                    f"Created approval message with {len(list(approval_message.get('approvals') or []))} tool results"
+                    f"Created approval message with {num_approvals} tool results"
                 )
             else:
                 message = self._message_from_user(prompt)
@@ -166,8 +169,9 @@ class LettaChatGenerator:
                 )
 
                 chunks = []
-                self.think_block_open = False
-                last_chunk = None
+                # BUG-1: Use local stream_state dict instead of self.think_block_open
+                # to be thread-safe across concurrent requests.
+                stream_state = {"think_block_open": False}
                 last_chunk = None
                 # Sometimes the response will time out while streaming, so we need a try / catch
                 try:
@@ -175,16 +179,24 @@ class LettaChatGenerator:
                         last_chunk = chunk
 
                         chunk_delta: Optional[StreamingChunk] = (
-                            self._process_streaming_chunk(chunk)
+                            self._process_streaming_chunk(chunk, stream_state)
                         )
                         if chunk_delta:
                             chunks.append(chunk_delta)
                             streaming_callback(chunk_delta)
 
-                    # assert last_chunk is not None
-                    completions = [
-                        self._create_message_from_chunks(agent_id, last_chunk, chunks)
-                    ]
+                    # BUG-3: Guard against last_chunk being None (empty stream)
+                    if last_chunk is None:
+                        logger.warning(
+                            "Stream produced no chunks for agent %s", agent_id
+                        )
+                        completions = [ChatMessage.from_assistant("")]
+                    else:
+                        completions = [
+                            self._create_message_from_chunks(
+                                agent_id, last_chunk, chunks
+                            )
+                        ]
                 except Exception as e:
                     logger.exception(
                         f"An error occurred while processing a streaming response: {str(e)}"
@@ -370,35 +382,38 @@ class LettaChatGenerator:
         )
         return complete_response
 
-    def _debug_tooL_statements(self) -> bool:
+    def _debug_tool_statements(self) -> bool:
         """
-        Returns True if the environment variable DEBUG_TOOL_STATEMENTS is set to True.
+        Returns True if the environment variable LETTA_CHAT_DEBUG_TOOL_STATEMENTS is set to True.
         """
         return os.getenv("LETTA_CHAT_DEBUG_TOOL_STATEMENTS", "False").lower() == "true"
 
     def _process_streaming_chunk(
-        self, chunk: LettaStreamingResponse
+        self, chunk: LettaStreamingResponse, stream_state: Dict[str, Any]
     ) -> Optional[StreamingChunk]:
         """
         Process a streaming chunk based on its type and invoke the streaming callback.
-        """
-        # logger.debug(f"Processing streaming chunk: {chunk}")
 
+        :param chunk: The streaming chunk to process.
+        :param stream_state: A per-request mutable dict holding streaming state
+            (e.g. ``think_block_open``).  Using a dict instead of instance attributes
+            makes this method safe for concurrent requests (BUG-1).
+        """
         content_prefix = ""
 
         # Check if we need to open a think block
         is_think_chunk = isinstance(
             chunk, (ReasoningMessage, ToolCallMessage, ToolReturnMessage)
         )
-        if is_think_chunk and not self.think_block_open:
+        if is_think_chunk and not stream_state["think_block_open"]:
             content_prefix = "<think>"
-            self.think_block_open = True
+            stream_state["think_block_open"] = True
 
         # Check if we need to close a think block
         is_assistant_chunk = isinstance(chunk, AssistantMessage)
-        if is_assistant_chunk and self.think_block_open:
+        if is_assistant_chunk and stream_state["think_block_open"]:
             content_prefix = "</think>"
-            self.think_block_open = False
+            stream_state["think_block_open"] = False
 
         if isinstance(chunk, ReasoningMessage):
             reasoning_chunk: ReasoningMessage = chunk
@@ -433,15 +448,10 @@ class LettaChatGenerator:
             if no_heartbeat_requested:
                 call_statement = call_statement + " *without heartbeat*"
 
-            if self._debug_tooL_statements():
+            if self._debug_tool_statements():  # BUG-4: fixed typo
                 call_statement = call_statement + " with arguments: " + arguments
 
             content = f"\n- {display_time} {call_statement}..."
-
-            # Construct a proper tool call delta for OpenAI compatibility
-            # OpenAI expects: delta: { tool_calls: [ { index: 0, id: "...", type: "function", function: { name: "...", arguments: "..." } } ] }
-            # Since Letta sends the full tool call at once (not streamed character by character usually?),
-            # we can send it as a single chunk.
 
             tool_call_payload = {
                 "id": tool_call.tool_call_id,
@@ -482,7 +492,6 @@ class LettaChatGenerator:
             content = content_prefix + text_content
             return StreamingChunk(content=content, meta=meta_dict)
 
-        # logger.debug(f"Ignoring streaming chunk type: {type(chunk)}")
         return None
 
     def _build_message(self, agent_id: str, response: LettaResponse):
@@ -504,7 +513,12 @@ class LettaChatGenerator:
             "total_tokens": usage.total_tokens,
         }
 
+        # BUG-5: Accumulate text from ALL AssistantMessages (not just the last one)
+        # and use an incrementing index for tool_calls.
         chat_message = None
+        assistant_content_parts: List[str] = []
+        tool_call_index = 0
+
         for message in messages:
             if isinstance(message, AssistantMessage):
                 if isinstance(message.content, list):
@@ -512,16 +526,16 @@ class LettaChatGenerator:
                         [part.text for part in message.content if hasattr(part, "text")]
                     )
                 else:
-                    content_str = message.content
-                chat_message = ChatMessage.from_assistant(content_str)
+                    content_str = message.content or ""
+                if content_str:
+                    assistant_content_parts.append(content_str)
+
             elif isinstance(message, ToolCallMessage):
-                # Handle ToolCallMessage for non-streaming response
-                # We need to construct a ChatMessage that contains the tool calls in its meta
                 tool_call = message.tool_call
 
-                # Create the tool call payload compatible with OpenAI
+                # BUG-5: Use incrementing index so multiple tool calls are correctly indexed
                 tool_call_payload = {
-                    "index": 0,
+                    "index": tool_call_index,
                     "id": tool_call.tool_call_id,
                     "type": "function",
                     "function": {
@@ -529,16 +543,23 @@ class LettaChatGenerator:
                         "arguments": tool_call.arguments,
                     },
                 }
+                tool_call_index += 1
 
-                # If we don't have a chat_message yet (likely), create one with empty content
                 if not chat_message:
                     chat_message = ChatMessage.from_assistant("")
 
-                # Initialize or append to tool_calls in meta
                 if "tool_calls" not in chat_message.meta:
                     chat_message.meta["tool_calls"] = []
 
                 chat_message.meta["tool_calls"].append(tool_call_payload)
+
+        # Merge all accumulated assistant text into the final message
+        if assistant_content_parts:
+            combined_content = "".join(assistant_content_parts)
+            if chat_message:
+                chat_message._content = [combined_content]  # type: ignore[assignment]
+            else:
+                chat_message = ChatMessage.from_assistant(combined_content)
 
         if not chat_message:
             chat_message = ChatMessage.from_assistant("No message found")

@@ -11,8 +11,6 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional
 from rich.console import Console
-from rich.markdown import Markdown
-from rich.text import Text
 from prompt_toolkit import prompt
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.completion import Completer, Completion
@@ -22,11 +20,9 @@ from prompt_toolkit.document import Document
 
 class OpenAIClient:
     def __init__(self, base_url: str, api_key: str = ""):
-        self.base_url = base_url.rstrip('/')
+        self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.headers = {
-            "Content-Type": "application/json"
-        }
+        self.headers = {"Content-Type": "application/json"}
         # Only add Authorization header if api_key is provided and non-empty
         if api_key and api_key.strip():
             self.headers["Authorization"] = f"Bearer {api_key}"
@@ -40,27 +36,24 @@ class OpenAIClient:
             click.echo(f"Error listing models: {e}", err=True)
             return {}
 
-    def chat_completion(self, model: str, messages: list, stream: bool = False, **kwargs) -> Dict[str, Any]:
-        payload = {
-            "model": model,
-            "messages": messages,
-            "stream": stream,
-            **kwargs
-        }
-        
+    def chat_completion(
+        self, model: str, messages: list, stream: bool = False, **kwargs
+    ) -> Dict[str, Any]:
+        payload = {"model": model, "messages": messages, "stream": stream, **kwargs}
+
         # Add agent_id if not already present (use model name as agent_id for Letta)
         if "agent_id" not in payload:
             payload["agent_id"] = model
-        
+
         try:
             response = requests.post(
                 f"{self.base_url}/chat/completions",
                 headers=self.headers,
                 json=payload,
-                stream=stream
+                stream=stream,
             )
             response.raise_for_status()
-            
+
             if stream:
                 return {"stream": response}
             else:
@@ -71,87 +64,99 @@ class OpenAIClient:
 
     def process_stream_response(self, response):
         """Process streaming response and yield content chunks"""
-        full_content = ""
-        
         for line in response.iter_lines():
             if line:
-                line = line.decode('utf-8')
-                if line.startswith('data: '):
+                line = line.decode("utf-8")
+                if line.startswith("data: "):
                     data = line[6:]  # Remove 'data: ' prefix
-                    
-                    if data == '[DONE]':
+
+                    if data == "[DONE]":
                         break
-                    
+
                     try:
                         json_data = json.loads(data)
-                        if 'choices' in json_data and json_data['choices']:
-                            delta = json_data['choices'][0].get('delta', {})
-                            if 'content' in delta:
-                                content = delta['content']
-                                full_content += content
+                        if "choices" in json_data and json_data["choices"]:
+                            delta = json_data["choices"][0].get("delta", {})
+                            if "content" in delta:
+                                content = delta["content"]
                                 yield content
                     except json.JSONDecodeError:
                         continue
-        
-        return full_content
+        # BUG-10: generator return values are silently discarded by callers;
+        # the full content is accumulated by the call-site instead.
 
 
 class DynamicCompleter(Completer):
     """Custom completer that provides dynamic completions for commands"""
-    
+
     def __init__(self, client: OpenAIClient):
         self.client = client
         self._models_cache = []
         self._models_cache_timestamp = 0
-        
+
         # Base slash commands
         self.base_commands = [
-            '/help', '/quit', '/exit', '/q', '/models', '/model', '/clear', 
-            '/history', '/temperature', '/max-tokens', '/stream', '/settings', '/refresh', '/url'
+            "/help",
+            "/quit",
+            "/exit",
+            "/q",
+            "/models",
+            "/model",
+            "/clear",
+            "/history",
+            "/temperature",
+            "/max-tokens",
+            "/stream",
+            "/settings",
+            "/refresh",
+            "/url",
         ]
-    
+
     def _get_models(self, force_refresh: bool = False):
         """Get models with caching (cache for 30 seconds)"""
         import time
+
         current_time = time.time()
-        
-        if force_refresh or current_time - self._models_cache_timestamp > 30:  # 30 second cache
+
+        if (
+            force_refresh or current_time - self._models_cache_timestamp > 30
+        ):  # 30 second cache
             models_data = self.client.list_models()
             if models_data and "data" in models_data:
                 # Store only combined "name (id)" format
                 self._models_cache = []
-                for model in models_data['data']:
-                    model_id = model.get('id', '')
-                    model_name = model.get('name', '')
-                    
+                for model in models_data["data"]:
+                    model_id = model.get("id", "")
+                    model_name = model.get("name", "")
+
                     # Add only the combined format
                     if model_name and model_id:
                         combined = f"{model_name} ({model_id})"
                         self._models_cache.append(combined)
-                        
+
                 self._models_cache_timestamp = current_time
-        
+
         return self._models_cache
-    
+
     def get_completions(self, document: Document, complete_event):
         text = document.text
-        
+
         # Handle slash commands
-        if text.startswith('/'):
-            parts = text[1:].split(' ')
+        if text.startswith("/"):
+            parts = text[1:].split(" ")
             command = parts[0]
-            
+
             # If we're completing the command itself
             if len(parts) == 1:
                 for cmd in self.base_commands:
                     if cmd[1:].startswith(command):
                         yield Completion(cmd[1:], start_position=-len(command))
-            
+
             # If we're completing arguments for /model command
-            elif len(parts) >= 2 and command == 'model':
-                partial_model = parts[-1] if len(parts) > 1 else ''
+            elif len(parts) >= 2 and command == "model":
+                partial_model = parts[-1] if len(parts) > 1 else ""
                 models = self._get_models()
-                
+
                 for model in models:
                     if model.startswith(partial_model):
                         yield Completion(model, start_position=-len(partial_model))
@@ -162,7 +167,7 @@ class SettingsManager:
         self.config_dir = Path.home() / ".letta-cli"
         self.settings_file = self.config_dir / "settings.json"
         self.config_dir.mkdir(exist_ok=True)
-    
+
     def load_settings(self) -> Dict[str, Any]:
         """Load settings from file, return defaults if file doesn't exist"""
         default_settings = {
@@ -171,24 +176,24 @@ class SettingsManager:
             "max_tokens": None,
             "stream": True,
             "base_url": "http://localhost:1416/v1",
-            "api_key": ""
+            "api_key": "",
         }
-        
+
         if self.settings_file.exists():
             try:
-                with open(self.settings_file, 'r') as f:
+                with open(self.settings_file, "r") as f:
                     saved_settings = json.load(f)
                     # Merge with defaults to handle new settings
                     default_settings.update(saved_settings)
             except (json.JSONDecodeError, IOError) as e:
                 click.echo(f"Warning: Could not load settings: {e}", err=True)
-        
+
         return default_settings
-    
+
     def save_settings(self, settings: Dict[str, Any]) -> None:
         """Save settings to file"""
         try:
-            with open(self.settings_file, 'w') as f:
+            with open(self.settings_file, "w") as f:
                 json.dump(settings, f, indent=2)
         except IOError as e:
             click.echo(f"Warning: Could not save settings: {e}", err=True)
@@ -199,23 +204,23 @@ class REPLContext:
         self.client = client
         self.conversation = []
         self.settings_manager = SettingsManager()
-        
+
         # Load saved settings
         saved_settings = self.settings_manager.load_settings()
         self.model = model or saved_settings.get("model")
         self.settings = {
             "temperature": saved_settings.get("temperature", 0.7),
             "max_tokens": saved_settings.get("max_tokens"),
-            "stream": saved_settings.get("stream", True)
+            "stream": saved_settings.get("stream", True),
         }
-        
+
         # Initialize rich console for markdown rendering
         self.console = Console(force_terminal=True, legacy_windows=False)
-        
+
         # Show loaded model if any
         if self.model:
             self._display_loaded_model()
-    
+
     def _display_loaded_model(self):
         """Display the loaded model with friendly name if available"""
         try:
@@ -223,15 +228,19 @@ class REPLContext:
             models_data = self.client.list_models()
             if models_data and "data" in models_data:
                 for m in models_data["data"]:
-                    if m.get('id') == self.model:
-                        model_name = m.get('name', '')
+                    if m.get("id") == self.model:
+                        model_name = m.get("name", "")
                         if model_name:
-                            click.echo(f"Loaded saved model: {model_name} ({self.model})")
+                            click.echo(
+                                f"Loaded saved model: {model_name} ({self.model})"
+                            )
                         else:
                             click.echo(f"Loaded saved model: {self.model}")
                         return
                 # Model not found in current list
-                click.echo(f"Loaded saved model: {self.model} (not currently available)")
+                click.echo(
+                    f"Loaded saved model: {self.model} (not currently available)"
+                )
             else:
                 click.echo(f"Loaded saved model: {self.model}")
         except Exception:
@@ -244,59 +253,64 @@ class REPLContext:
             "temperature": self.settings["temperature"],
             "max_tokens": self.settings["max_tokens"],
             "stream": self.settings["stream"],
-            "base_url": "http://localhost:1416/v1",  # Could be made configurable
-            "api_key": ""  # Could be made configurable
+            # BUG-8: persist the actual client values instead of hardcoded defaults
+            "base_url": self.client.base_url,
+            "api_key": self.client.api_key,
         }
         self.settings_manager.save_settings(settings_to_save)
-    
+
     def format_timestamp(self) -> str:
         """Get current time in HH:MM:SS format with bold formatting"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         return f"\033[1m[{timestamp}]\033[0m"
-    
+
     def format_think_line(self, text: str, terminal_width: int = 80) -> str:
         """Format a thinking line with proper indentation, wrapping, and timestamp highlighting"""
         if not text.strip():
             return ""
-        
+
         # Check if line starts with a timestamp pattern (- HH:MM:SS format)
-        timestamp_pattern = r'^(\s*-\s*)(\d{2}:\d{2}:\d{2})\s*(.*)$'
+        timestamp_pattern = r"^(\s*-\s*)(\d{2}:\d{2}:\d{2})\s*(.*)$"
         timestamp_match = re.match(timestamp_pattern, text.strip())
-        
+
         if timestamp_match:
             prefix = timestamp_match.group(1)  # "- "
             timestamp = timestamp_match.group(2)  # "HH:MM:SS"
             content = timestamp_match.group(3)  # rest of the text
-            
+
             # Format timestamp in bold cyan and content in dim italic
             formatted_timestamp = f"\033[1;36m{prefix}{timestamp}\033[0m"
-            
+
             # Wrap the content part, accounting for the timestamp prefix length
             indent = "    "
             timestamp_prefix_len = len(prefix + timestamp + " ")
             content_indent = indent + " " * timestamp_prefix_len
-            
+
             # Use much more of the terminal width for thinking content
-            available_width = max(80, terminal_width - len(indent) - 8)  # Just leave small margin
-            
+            available_width = max(
+                80, terminal_width - len(indent) - 8
+            )  # Just leave small margin
+
             if content:
                 wrapped_content = textwrap.fill(
-                    content,
-                    width=available_width,
-                    subsequent_indent=""
-                ).split('\n')
-                
+                    content, width=available_width, subsequent_indent=""
+                ).split("\n")
+
                 # First line includes timestamp, subsequent lines are just content
                 formatted_lines = []
                 for i, line in enumerate(wrapped_content):
                     if i == 0:
                         # First line with timestamp
-                        formatted_lines.append(f"{indent}{formatted_timestamp} \033[2;3m{line}\033[0m")
+                        formatted_lines.append(
+                            f"{indent}{formatted_timestamp} \033[2;3m{line}\033[0m"
+                        )
                     else:
                         # Continuation lines
-                        formatted_lines.append(f"{content_indent}\033[2;3m{line}\033[0m")
-                
-                return '\n'.join(formatted_lines)
+                        formatted_lines.append(
+                            f"{content_indent}\033[2;3m{line}\033[0m"
+                        )
+
+                return "\n".join(formatted_lines)
             else:
                 # Just timestamp, no content
                 return f"{indent}{formatted_timestamp}"
@@ -304,72 +318,73 @@ class REPLContext:
             # No timestamp, treat as regular thinking content
             indent = "    "
             # Use much more of the terminal width for thinking content
-            available_width = max(80, terminal_width - len(indent) - 8)  # Just leave small margin
-            
+            available_width = max(
+                80, terminal_width - len(indent) - 8
+            )  # Just leave small margin
+
             wrapped_lines = textwrap.fill(
-                text.strip(), 
-                width=available_width,
-                subsequent_indent=""
-            ).split('\n')
-            
+                text.strip(), width=available_width, subsequent_indent=""
+            ).split("\n")
+
             # Apply indentation and dim italics to each wrapped line
             formatted_lines = []
             for line in wrapped_lines:
                 formatted_lines.append(f"{indent}\033[2;3m{line}\033[0m")
-            
-            return '\n'.join(formatted_lines)
-    
+
+            return "\n".join(formatted_lines)
+
     def format_markdown(self, content: str) -> str:
         """Convert markdown content to ANSI formatted text with clickable links"""
         # Always use basic formatting to ensure URLs are expanded
         return self.basic_markdown_format(content)
-    
+
     def basic_markdown_format(self, content: str) -> str:
         """Enhanced markdown formatting using regex with URL expansion"""
         # Process line by line to handle bullet points and other formatting
-        lines = content.split('\n')
+        lines = content.split("\n")
         formatted_lines = []
-        
+
         for line in lines:
             # Handle bullet points (•, -, *, +)
-            line = re.sub(r'^(\s*)[•\-\*\+]\s+', r'\1• ', line)
-            
+            line = re.sub(r"^(\s*)[•\-\*\+]\s+", r"\1• ", line)
+
             # Bold: **text** or __text__
-            line = re.sub(r'\*\*(.*?)\*\*', r'\033[1m\1\033[0m', line)
-            line = re.sub(r'__(.*?)__', r'\033[1m\1\033[0m', line)
-            
+            line = re.sub(r"\*\*(.*?)\*\*", r"\033[1m\1\033[0m", line)
+            line = re.sub(r"__(.*?)__", r"\033[1m\1\033[0m", line)
+
             # Italic: *text* or _text_ (but not if it's a bullet point)
-            line = re.sub(r'(?<![\s•])\*(.*?)\*(?!\s)', r'\033[3m\1\033[0m', line)
-            line = re.sub(r'(?<![\s•])_(.*?)_(?!\s)', r'\033[3m\1\033[0m', line)
-            
+            line = re.sub(r"(?<![\s•])\*(.*?)\*(?!\s)", r"\033[3m\1\033[0m", line)
+            line = re.sub(r"(?<![\s•])_(.*?)_(?!\s)", r"\033[3m\1\033[0m", line)
+
             # Headers: # Header
-            line = re.sub(r'^#{1}\s+(.*?)$', r'\033[1;36m\1\033[0m', line)
-            line = re.sub(r'^#{2}\s+(.*?)$', r'\033[1;35m\1\033[0m', line)
-            line = re.sub(r'^#{3}\s+(.*?)$', r'\033[1;34m\1\033[0m', line)
-            
+            line = re.sub(r"^#{1}\s+(.*?)$", r"\033[1;36m\1\033[0m", line)
+            line = re.sub(r"^#{2}\s+(.*?)$", r"\033[1;35m\1\033[0m", line)
+            line = re.sub(r"^#{3}\s+(.*?)$", r"\033[1;34m\1\033[0m", line)
+
             # Code blocks: `code`
-            line = re.sub(r'`([^`]+)`', r'\033[37;100m\1\033[0m', line)
-            
+            line = re.sub(r"`([^`]+)`", r"\033[37;100m\1\033[0m", line)
+
             # Links: [text](url) - expand to show both text and URL for easy clicking
             def expand_link(match):
                 text = match.group(1)
                 url = match.group(2)
                 # Always show both text and URL for maximum clickability
-                return f'{text} - \033[4;34m{url}\033[0m'
-            
-            line = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', expand_link, line)
-            
+                return f"{text} - \033[4;34m{url}\033[0m"
+
+            line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", expand_link, line)
+
             formatted_lines.append(line)
-        
-        return '\n'.join(formatted_lines)
+
+        return "\n".join(formatted_lines)
 
     def format_response(self, content: str) -> str:
         """Format response content with proper think block formatting and markdown"""
+
         # Find and format <think> blocks first
         def format_think_block(match):
             think_content = match.group(1).strip()
             # Add proper indentation and italics styling for think blocks
-            lines = think_content.split('\n')
+            lines = think_content.split("\n")
             formatted_lines = []
             for line in lines:
                 if line.strip():
@@ -378,36 +393,38 @@ class REPLContext:
                 else:
                     formatted_lines.append("")
             return f"\n{chr(10).join(formatted_lines)}\n"
-        
+
         # Replace <think>...</think> blocks with formatted versions (removing XML tags)
-        formatted = re.sub(r'<think>(.*?)</think>', format_think_block, content, flags=re.DOTALL)
-        
+        formatted = re.sub(
+            r"<think>(.*?)</think>", format_think_block, content, flags=re.DOTALL
+        )
+
         # Then apply markdown formatting to the rest (but not to think blocks)
         # Split by think blocks to avoid double-formatting
-        parts = re.split(r'(\n    \033\[2;3m.*?\033\[0m\n)', formatted)
+        parts = re.split(r"(\n    \033\[2;3m.*?\033\[0m\n)", formatted)
         result_parts = []
-        
+
         for part in parts:
-            if '\033[2;3m' in part:  # This is a think block part
+            if "\033[2;3m" in part:  # This is a think block part
                 result_parts.append(part)
             else:
                 # Apply markdown formatting to non-think content
                 result_parts.append(self.format_markdown(part))
-        
-        return ''.join(result_parts)
+
+        return "".join(result_parts)
 
     def set_model(self, model: str):
         model = model.strip()
         # Resolve model name to ID if needed
         resolved_model = self.resolve_model_name(model)
         self.model = resolved_model
-        
+
         # Show a nice display of what was set
         models_data = self.client.list_models()
         if models_data and "data" in models_data:
             for m in models_data["data"]:
-                if m.get('id') == resolved_model:
-                    model_name = m.get('name', '')
+                if m.get("id") == resolved_model:
+                    model_name = m.get("name", "")
                     if model_name:
                         click.echo(f"Model set to: {model_name} ({resolved_model})")
                     else:
@@ -415,7 +432,7 @@ class REPLContext:
                     # Save settings when model is changed
                     self.save_current_settings()
                     return
-        
+
         click.echo(f"Model set to: {resolved_model}")
         # Save settings even if model not found in list
         self.save_current_settings()
@@ -429,58 +446,59 @@ class REPLContext:
         timestamp = self.format_timestamp()
         click.echo(f"{timestamp} You: {message}")
 
-        self.conversation.append({"role": "user", "content": message})
-        
+        # BUG-9: store real ISO timestamp alongside each message so /history can display it
+        msg_ts = datetime.now().isoformat(timespec="seconds")
+        self.conversation.append({"role": "user", "content": message, "ts": msg_ts})
+
         # Extract stream setting
         stream = self.settings.get("stream", True)
-        settings_without_stream = {k: v for k, v in self.settings.items() if k != "stream" and v is not None}
-        
+        settings_without_stream = {
+            k: v for k, v in self.settings.items() if k != "stream" and v is not None
+        }
+
         response = self.client.chat_completion(
-            self.model, 
-            self.conversation, 
-            stream=stream,
-            **settings_without_stream
+            self.model, self.conversation, stream=stream, **settings_without_stream
         )
-        
+
         response_timestamp = self.format_timestamp()
-        
+
         if stream and response and "stream" in response:
             click.echo(f"{response_timestamp} Assistant: ")
             assistant_message = ""
             in_think_block = False
             line_buffer = ""
-            
+
             # Get terminal width for proper wrapping
             try:
                 terminal_width = click.get_terminal_size().columns
             except (OSError, AttributeError):
                 terminal_width = 80  # fallback
-            
+
             try:
                 for chunk in self.client.process_stream_response(response["stream"]):
                     assistant_message += chunk
                     line_buffer += chunk
-                    
+
                     # Check for think block start/end
-                    if '<think>' in line_buffer:
+                    if "<think>" in line_buffer:
                         in_think_block = True
                         # Remove the <think> tag from display
-                        line_buffer = line_buffer.replace('<think>', '')
-                    
-                    if '</think>' in line_buffer:
+                        line_buffer = line_buffer.replace("<think>", "")
+
+                    if "</think>" in line_buffer:
                         in_think_block = False
                         # Remove the </think> tag and process any remaining content
-                        parts = line_buffer.split('</think>')
+                        parts = line_buffer.split("</think>")
                         if parts[0].strip():
                             # Format and display the last think line with wrapping
                             formatted = self.format_think_line(parts[0], terminal_width)
                             click.echo(formatted)
                         line_buffer = parts[1] if len(parts) > 1 else ""
                         # Continue processing the buffer instead of displaying immediately
-                    
+
                     # Process complete lines
-                    while '\n' in line_buffer:
-                        line, line_buffer = line_buffer.split('\n', 1)
+                    while "\n" in line_buffer:
+                        line, line_buffer = line_buffer.split("\n", 1)
                         if line.strip():
                             if in_think_block:
                                 # Display thinking lines with proper wrapping and indentation
@@ -490,7 +508,7 @@ class REPLContext:
                                 # Display regular content with markdown formatting
                                 formatted_line = self.format_markdown(line)
                                 click.echo(formatted_line)
-                
+
                 # Handle any remaining content in buffer
                 if line_buffer.strip():
                     if in_think_block:
@@ -499,19 +517,31 @@ class REPLContext:
                     else:
                         formatted_buffer = self.format_markdown(line_buffer)
                         click.echo(formatted_buffer)
-                elif not line_buffer and not assistant_message.endswith('\n'):
+                elif not line_buffer and not assistant_message.endswith("\n"):
                     click.echo()  # Add final newline only if needed
-                
+
                 if assistant_message:
-                    self.conversation.append({"role": "assistant", "content": assistant_message})
+                    # BUG-9: record real timestamp for the assistant reply too
+                    reply_ts = datetime.now().isoformat(timespec="seconds")
+                    self.conversation.append(
+                        {
+                            "role": "assistant",
+                            "content": assistant_message,
+                            "ts": reply_ts,
+                        }
+                    )
             except Exception as e:
                 click.echo(f"\nError processing stream: {e}", err=True)
-                
+
         elif not stream and response and "choices" in response:
             assistant_message = response["choices"][0]["message"]["content"]
             formatted_message = self.format_response(assistant_message)
             click.echo(f"{response_timestamp} Assistant: {formatted_message}\n")
-            self.conversation.append({"role": "assistant", "content": assistant_message})
+            # BUG-9: record real timestamp for non-streaming reply
+            reply_ts = datetime.now().isoformat(timespec="seconds")
+            self.conversation.append(
+                {"role": "assistant", "content": assistant_message, "ts": reply_ts}
+            )
         else:
             click.echo("Error: No response received", err=True)
 
@@ -523,13 +553,21 @@ class REPLContext:
         if not self.conversation:
             click.echo("No conversation history.")
             return
-        
-        for i, msg in enumerate(self.conversation):
+
+        for msg in self.conversation:
             role = msg["role"].title()
             content = msg["content"]
-            # Add mock timestamps for history (since we don't store them)
-            timestamp = f"\033[1m[{i:02d}:{30+i:02d}:{15+i*2:02d}]\033[0m"
-            
+            # BUG-9: show real stored timestamp, fall back to index-based label if missing
+            ts_raw = msg.get("ts", "")
+            if ts_raw:
+                try:
+                    ts_display = datetime.fromisoformat(ts_raw).strftime("%H:%M:%S")
+                except ValueError:
+                    ts_display = ts_raw
+                timestamp = f"\033[1m[{ts_display}]\033[0m"
+            else:
+                timestamp = ""
+
             if role == "Assistant":
                 formatted_content = self.format_response(content)
                 click.echo(f"{timestamp} {role}: {formatted_content}")
@@ -557,99 +595,111 @@ class REPLContext:
         self.settings["stream"] = stream
         click.echo(f"Streaming {'enabled' if stream else 'disabled'}")
         self.save_current_settings()
-    
+
     def show_settings(self):
         """Display current settings"""
         click.echo("Current settings:")
         click.echo(f"  Model: {self.model if self.model else 'None'}")
         click.echo(f"  Temperature: {self.settings['temperature']}")
-        tokens = self.settings['max_tokens']
+        tokens = self.settings["max_tokens"]
         click.echo(f"  Max tokens: {tokens if tokens else 'unlimited'}")
-        click.echo(f"  Streaming: {'enabled' if self.settings['stream'] else 'disabled'}")
+        click.echo(
+            f"  Streaming: {'enabled' if self.settings['stream'] else 'disabled'}"
+        )
         click.echo(f"  Base URL: {self.client.base_url}")
         click.echo(f"  API Key: {'***' if self.client.api_key else 'None'}")
         click.echo(f"  Settings file: {self.settings_manager.settings_file}")
-    
+
     def reload_client_from_env(self):
         """Reload the client with fresh environment variables"""
-        env_base_url = os.getenv('LETTA_BASE_URL')
-        if env_base_url and not env_base_url.endswith('/v1'):
-            env_base_url = env_base_url.rstrip('/') + '/v1'
-        
-        env_api_key = os.getenv('LETTA_API_TOKEN', '')
-        
+        env_base_url = os.getenv("LETTA_BASE_URL")
+        if env_base_url and not env_base_url.endswith("/v1"):
+            env_base_url = env_base_url.rstrip("/") + "/v1"
+
+        env_api_key = os.getenv("LETTA_API_TOKEN", "")
+
         # Use environment variables if available, otherwise keep current values
         new_base_url = env_base_url or self.client.base_url
-        new_api_key = env_api_key if env_api_key != '' else self.client.api_key
-        
+        new_api_key = env_api_key if env_api_key != "" else self.client.api_key
+
         # Create new client
         self.client = OpenAIClient(new_base_url, new_api_key)
-        
-        click.echo(f"Reloaded client configuration:")
+
+        click.echo("Reloaded client configuration:")
         click.echo(f"  Base URL: {self.client.base_url}")
         click.echo(f"  API Key: {'***' if self.client.api_key else 'None'}")
-    
+
     def resolve_model_name(self, model_name_or_id: str) -> str:
         """Resolve model name to ID, return the ID if it's already an ID or name if not found"""
         models_data = self.client.list_models()
         if models_data and "data" in models_data:
             for model in models_data["data"]:
-                model_id = model.get('id', '')
-                model_name = model.get('name', '')
-                
+                model_id = model.get("id", "")
+                model_name = model.get("name", "")
+
                 # Check if input matches the combined format "name (id)"
-                combined_format = f"{model_name} ({model_id})" if model_name and model_id else ""
+                combined_format = (
+                    f"{model_name} ({model_id})" if model_name and model_id else ""
+                )
                 if model_name_or_id == combined_format:
                     return model_id
-                
+
                 # Check individual components
-                if model.get('name') == model_name_or_id:
-                    return model.get('id', model_name_or_id)
-                elif model.get('id') == model_name_or_id:
+                if model.get("name") == model_name_or_id:
+                    return model.get("id", model_name_or_id)
+                elif model.get("id") == model_name_or_id:
                     return model_name_or_id
         return model_name_or_id  # Return as-is if not found
 
 
 @click.group(invoke_without_command=True)
-@click.option('--base-url', default=None, help='API base URL (overrides saved setting)')
-@click.option('--api-key', default=None, help='API key for authentication (overrides saved setting)')
+@click.option("--base-url", default=None, help="API base URL (overrides saved setting)")
+@click.option(
+    "--api-key",
+    default=None,
+    help="API key for authentication (overrides saved setting)",
+)
 @click.pass_context
 def cli(ctx, base_url, api_key):
     """OpenAI CLI Client for Letta - Interactive REPL"""
     ctx.ensure_object(dict)
-    
+
     # Load saved settings for base_url and api_key if not provided
     settings_manager = SettingsManager()
     saved_settings = settings_manager.load_settings()
-    
+
     # Check environment variables, then saved settings, then defaults
-    env_base_url = os.getenv('LETTA_BASE_URL')
-    if env_base_url and not env_base_url.endswith('/v1'):
-        env_base_url = env_base_url.rstrip('/') + '/v1'
-    
-    env_api_key = os.getenv('LETTA_API_TOKEN', '')
-    
-    final_base_url = base_url or env_base_url or saved_settings.get('base_url', 'http://localhost:1416/v1')
-    final_api_key = api_key or env_api_key or saved_settings.get('api_key', '')
-    
-    ctx.obj['client'] = OpenAIClient(final_base_url, final_api_key)
-    
+    env_base_url = os.getenv("LETTA_BASE_URL")
+    if env_base_url and not env_base_url.endswith("/v1"):
+        env_base_url = env_base_url.rstrip("/") + "/v1"
+
+    env_api_key = os.getenv("LETTA_API_TOKEN", "")
+
+    final_base_url = (
+        base_url
+        or env_base_url
+        or saved_settings.get("base_url", "http://localhost:1416/v1")
+    )
+    final_api_key = api_key or env_api_key or saved_settings.get("api_key", "")
+
+    ctx.obj["client"] = OpenAIClient(final_base_url, final_api_key)
+
     if ctx.invoked_subcommand is None:
-        start_repl(ctx.obj['client'])
+        start_repl(ctx.obj["client"])
 
 
 @cli.command()
 @click.pass_context
 def models(ctx):
     """List available models"""
-    client = ctx.obj['client']
+    client = ctx.obj["client"]
     models_data = client.list_models()
-    
+
     if models_data and "data" in models_data:
         click.echo("Available models:")
         for model in models_data["data"]:
-            model_id = model.get('id', 'Unknown')
-            model_name = model.get('name', '')
+            model_id = model.get("id", "Unknown")
+            model_name = model.get("name", "")
             if model_name:
                 click.echo(f"  - {model_name} ({model_id})")
             else:
@@ -659,23 +709,25 @@ def models(ctx):
 
 
 @cli.command()
-@click.argument('model')
-@click.argument('message')
-@click.option('--temperature', type=float, default=0.7, help='Temperature for generation')
-@click.option('--max-tokens', type=int, help='Maximum tokens to generate')
-@click.option('--stream/--no-stream', default=True, help='Enable/disable streaming')
+@click.argument("model")
+@click.argument("message")
+@click.option(
+    "--temperature", type=float, default=0.7, help="Temperature for generation"
+)
+@click.option("--max-tokens", type=int, help="Maximum tokens to generate")
+@click.option("--stream/--no-stream", default=True, help="Enable/disable streaming")
 @click.pass_context
 def complete(ctx, model, message, temperature, max_tokens, stream):
     """Send a single completion request"""
-    client = ctx.obj['client']
+    client = ctx.obj["client"]
     messages = [{"role": "user", "content": message}]
-    
+
     kwargs = {"temperature": temperature, "stream": stream}
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
-        
+
     response = client.chat_completion(model, messages, **kwargs)
-    
+
     if stream and response and "stream" in response:
         try:
             for chunk in client.process_stream_response(response["stream"]):
@@ -694,39 +746,39 @@ def complete(ctx, model, message, temperature, max_tokens, stream):
 def start_repl(client: OpenAIClient):
     """Start the interactive REPL"""
     ctx = REPLContext(client)
-    
+
     # Set up command history and dynamic autocomplete
     history = InMemoryHistory()
     completer = DynamicCompleter(client)
-    
+
     click.echo("🤖 OpenAI CLI REPL - Type /help for commands, /quit to exit")
     click.echo("Arrow keys for history, Tab for command completion")
     click.echo("=" * 50)
-    
+
     while True:
         try:
             user_input = prompt(
                 "> ",
                 history=history,
                 completer=completer,
-                complete_style=CompleteStyle.MULTI_COLUMN
+                complete_style=CompleteStyle.MULTI_COLUMN,
             ).strip()
-            
+
             if not user_input:
                 continue
-                
+
             # Handle REPL commands
-            if user_input.startswith('/'):
-                parts = user_input[1:].split(' ', 1)
+            if user_input.startswith("/"):
+                parts = user_input[1:].split(" ", 1)
                 command = parts[0].lower()
                 args = parts[1] if len(parts) > 1 else ""
-                
-                if command in ['quit', 'exit', 'q']:
+
+                if command in ["quit", "exit", "q"]:
                     click.echo("Goodbye! 👋")
                     break
-                elif command == 'help':
+                elif command == "help":
                     show_help()
-                elif command == 'models':
+                elif command == "models":
                     # Force refresh models when explicitly requested
                     completer._models_cache = []
                     completer._models_cache_timestamp = 0
@@ -734,13 +786,13 @@ def start_repl(client: OpenAIClient):
                     if models_data and "data" in models_data:
                         click.echo("Available models:")
                         for model in models_data["data"]:
-                            model_id = model.get('id', 'Unknown')
-                            model_name = model.get('name', '')
+                            model_id = model.get("id", "Unknown")
+                            model_name = model.get("name", "")
                             if model_name:
                                 click.echo(f"  - {model_name} ({model_id})")
                             else:
                                 click.echo(f"  - {model_id}")
-                elif command == 'model':
+                elif command == "model":
                     if args:
                         ctx.set_model(args)
                     else:
@@ -748,11 +800,11 @@ def start_repl(client: OpenAIClient):
                             click.echo(f"Current model: {ctx.model}")
                         else:
                             click.echo("No model selected")
-                elif command == 'clear':
+                elif command == "clear":
                     ctx.clear_conversation()
-                elif command == 'history':
+                elif command == "history":
                     ctx.show_conversation()
-                elif command == 'temperature':
+                elif command == "temperature":
                     if args:
                         try:
                             temp = float(args)
@@ -760,8 +812,10 @@ def start_repl(client: OpenAIClient):
                         except ValueError:
                             click.echo("Invalid temperature value", err=True)
                     else:
-                        click.echo(f"Current temperature: {ctx.settings['temperature']}")
-                elif command == 'max-tokens':
+                        click.echo(
+                            f"Current temperature: {ctx.settings['temperature']}"
+                        )
+                elif command == "max-tokens":
                     if args:
                         try:
                             tokens = int(args) if args != "none" else None
@@ -769,32 +823,39 @@ def start_repl(client: OpenAIClient):
                         except ValueError:
                             click.echo("Invalid max tokens value", err=True)
                     else:
-                        tokens = ctx.settings['max_tokens']
-                        click.echo(f"Current max tokens: {tokens if tokens else 'unlimited'}")
-                elif command == 'stream':
+                        tokens = ctx.settings["max_tokens"]
+                        click.echo(
+                            f"Current max tokens: {tokens if tokens else 'unlimited'}"
+                        )
+                elif command == "stream":
                     if args:
-                        if args.lower() in ['true', 'on', 'yes', '1']:
+                        if args.lower() in ["true", "on", "yes", "1"]:
                             ctx.set_streaming(True)
-                        elif args.lower() in ['false', 'off', 'no', '0']:
+                        elif args.lower() in ["false", "off", "no", "0"]:
                             ctx.set_streaming(False)
                         else:
-                            click.echo("Invalid streaming value. Use true/false, on/off, yes/no, or 1/0", err=True)
+                            click.echo(
+                                "Invalid streaming value. Use true/false, on/off, yes/no, or 1/0",
+                                err=True,
+                            )
                     else:
-                        stream = ctx.settings['stream']
+                        stream = ctx.settings["stream"]
                         click.echo(f"Streaming: {'enabled' if stream else 'disabled'}")
-                elif command == 'settings':
+                elif command == "settings":
                     ctx.show_settings()
-                elif command == 'refresh':
+                elif command == "refresh":
                     # Force refresh models cache and other cached data
                     completer._models_cache = []
                     completer._models_cache_timestamp = 0
-                    click.echo("Refreshed models cache. Use /models to see updated list.")
-                elif command == 'url':
+                    click.echo(
+                        "Refreshed models cache. Use /models to see updated list."
+                    )
+                elif command == "url":
                     if args:
                         # Set a new URL directly
                         new_url = args.strip()
-                        if not new_url.endswith('/v1'):
-                            new_url = new_url.rstrip('/') + '/v1'
+                        if not new_url.endswith("/v1"):
+                            new_url = new_url.rstrip("/") + "/v1"
                         ctx.client = OpenAIClient(new_url, ctx.client.api_key)
                         completer._models_cache = []
                         completer._models_cache_timestamp = 0
@@ -805,11 +866,14 @@ def start_repl(client: OpenAIClient):
                         completer._models_cache = []
                         completer._models_cache_timestamp = 0
                 else:
-                    click.echo(f"Unknown command: {command}. Type /help for available commands.", err=True)
+                    click.echo(
+                        f"Unknown command: {command}. Type /help for available commands.",
+                        err=True,
+                    )
             else:
                 # Regular chat message
                 ctx.send_message(user_input)
-                
+
         except KeyboardInterrupt:
             click.echo("\nUse /quit to exit")
         except EOFError:

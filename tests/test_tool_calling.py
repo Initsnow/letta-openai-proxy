@@ -100,20 +100,41 @@ mock_agents_pkg.Message = MagicMock()
 mock_agents_pkg.LettaResponse = MockLettaResponse
 sys.modules["letta_client.types.agents"] = mock_agents_pkg
 
+
+# Mock letta_client.types.agents sub-modules imported by pipeline_wrapper
+class MockApprovalRequestMessage:
+    def __init__(self, tool_call=None):
+        self.tool_call = tool_call
+
+
+class MockApprovalCreateParam(dict):
+    """Minimal TypedDict-compatible mock for ApprovalCreateParam."""
+
+    pass
+
+
+mock_approval_create_param_mod = MagicMock()
+mock_approval_create_param_mod.ApprovalCreateParam = MockApprovalCreateParam
+sys.modules["letta_client.types.agents.approval_create_param"] = (
+    mock_approval_create_param_mod
+)
+
+mock_agents_pkg.ApprovalRequestMessage = MockApprovalRequestMessage
+
+mock_message_create_params_mod = MagicMock()
+sys.modules["letta_client.types.agents.message_create_params"] = (
+    mock_message_create_params_mod
+)
+
+# letta_client.types.agents.letta_response (Usage class)
+mock_agents_letta_response_mod = MagicMock()
+mock_agents_letta_response_mod.Usage = MagicMock()
+sys.modules["letta_client.types.agents.letta_response"] = mock_agents_letta_response_mod
+
+# letta_client.types.agents.letta_streaming_response (LettaUsageStatistics)
 sys.modules["letta_client.types.agents.letta_streaming_response"] = (
     mock_streaming_response_mod
 )
-
-# Mock letta_client.types.agents.letta_response
-mock_letta_response_mod = MagicMock()
-mock_letta_response_mod.Usage = MagicMock()
-sys.modules["letta_client.types.agents.letta_response"] = mock_letta_response_mod
-
-sys.modules["letta_client.types.agents.message_create_params"] = MagicMock()
-
-mock_assistant_message_mod = MagicMock()
-mock_assistant_message_mod.AssistantMessage = MockAssistantMessage
-sys.modules["letta_client.types.assistant_message"] = mock_assistant_message_mod
 
 mock_reasoning_message_mod = MagicMock()
 mock_reasoning_message_mod.ReasoningMessage = MockReasoningMessage
@@ -273,7 +294,9 @@ class TestToolCalling(unittest.TestCase):
         # The method uses datetime.now(), so we can't easily assert exact string content without regex.
         # But we can check meta["tool_calls"].
 
-        result = self.generator._process_streaming_chunk(chunk)
+        # BUG-1 fix: _process_streaming_chunk now requires a per-request stream_state dict
+        stream_state = {"think_block_open": False}
+        result = self.generator._process_streaming_chunk(chunk, stream_state)
 
         self.assertIsNotNone(result)
         self.assertIn("tool_calls", result.meta)

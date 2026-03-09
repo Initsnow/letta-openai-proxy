@@ -78,7 +78,9 @@ async def get_models_override():
 
     This returns a list of available Letta agents as OpenAI-compatible models.
     """
-    letta_models = fetch_letta_models()
+    # OPT-3: fetch_letta_models() is a blocking network call; run it in a thread
+    # pool to avoid blocking the async event loop.
+    letta_models = await run_in_threadpool(fetch_letta_models)
 
     return ModelsResponse(
         data=[
@@ -96,10 +98,6 @@ async def get_models_override():
 
 
 openai_module_to_patch.get_models = get_models_override
-
-for route_idx, route in enumerate(openai_module_to_patch.router.routes):
-    if isinstance(route, APIRoute) and route.path in ["/models", "/v1/models"]:
-        route.endpoint = get_models_override
 
 
 async def chat_completions_override(
@@ -162,6 +160,10 @@ async def chat_completions_override(
 
     resp_id = f"chatcmpl-{uuid.uuid4()}"  # OpenAI compatible ID
 
+    # OPT-4: Compute `created` once so all chunks in this response share the
+    # same timestamp, matching the OpenAI streaming specification.
+    created_at = int(time.time())
+
     def stream_chunks() -> Generator[str, None, None]:
         try:
             for chunk_content in result_generator:
@@ -190,7 +192,7 @@ async def chat_completions_override(
                 chunk_resp = ChatCompletion(
                     id=resp_id,
                     object="chat.completion.chunk",
-                    created=int(time.time()),
+                    created=created_at,
                     model=chat_req.model,
                     choices=[Choice(index=0, delta=Message(**msg_args))],  # pyright: ignore[reportArgumentType]
                 )
@@ -199,7 +201,7 @@ async def chat_completions_override(
             final_chunk = ChatCompletion(
                 id=resp_id,
                 object="chat.completion.chunk",
-                created=int(time.time()),
+                created=created_at,
                 model=chat_req.model,
                 choices=[
                     Choice(
@@ -210,23 +212,12 @@ async def chat_completions_override(
                 ],
             )
             yield f"data: {final_chunk.model_dump_json()}\n\n"
+            yield "data: [DONE]\n\n"
         except Exception as e:
+            # BUG-7: Do NOT leak the error message as an AI reply.
+            # Log the error and close the stream gracefully.
             logger.error(f"Error during streaming from letta_proxy: {e}", exc_info=True)
-            error_chunk_content = f"Error processing stream: {e}"
-            error_resp = ChatCompletion(
-                id=resp_id,
-                object="chat.completion.chunk",
-                created=int(time.time()),
-                model=chat_req.model,
-                choices=[
-                    Choice(
-                        index=0,
-                        delta=Message(role="assistant", content=error_chunk_content),  # pyright: ignore[reportArgumentType]
-                        finish_reason="stop",
-                    )
-                ],
-            )
-            yield f"data: {error_resp.model_dump_json()}\n\n"
+            yield "data: [DONE]\n\n"
 
     if chat_req.stream:
         logger.info(f"Returning StreamingResponse for model {chat_req.model}")

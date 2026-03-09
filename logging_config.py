@@ -1,7 +1,7 @@
 import logging
 import os
-import sys
 import structlog
+
 
 def configure_logging():
     """
@@ -10,12 +10,6 @@ def configure_logging():
     """
     log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     use_json = os.getenv("HAYSTACK_LOGGING_USE_JSON", "false").lower() == "true"
-    
-    # If not explicitly set to use JSON, check if we are in a TTY
-    if not use_json and not sys.stdout.isatty():
-        # Default to JSON in non-interactive environments (unless explicitly disabled, but we'll stick to a simple rule)
-        # Actually, let's just stick to the env var or default to console for now unless in prod.
-        pass
 
     try:
         log_level = getattr(logging, log_level_name)
@@ -24,7 +18,7 @@ def configure_logging():
 
     # 1. Configure Standard Library Logging
     # We want standard logging (used by libraries) to be captured by structlog
-    
+
     # Shared processors for both structlog and stdlib
     shared_processors = [
         structlog.contextvars.merge_contextvars,
@@ -63,19 +57,14 @@ def configure_logging():
         cache_logger_on_first_use=True,
     )
 
-    # Apply configuration to startdard library root logger
+    # BUG-11: First remove any existing handlers to avoid duplicate log output,
+    # then add our configured handler.
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
     root_logger = logging.getLogger()
-    root_logger.addHandler(handler)
     root_logger.setLevel(log_level)
-    
-    # Avoid duplicate logs if other handlers are already attached (e.g. from uvicorn)
-    # But usually creating a fresh handler is fine if we clear others or if this is the main entrypoint
-    # For safe measure, let's remove existing handlers from root to avoid double logging
-    if root_logger.handlers:
-        for h in root_logger.handlers[:]:
-            root_logger.removeHandler(h)
+    for h in root_logger.handlers[:]:
+        root_logger.removeHandler(h)
     root_logger.addHandler(handler)
 
     # Set levels for specific noisy libraries if needed
@@ -84,4 +73,3 @@ def configure_logging():
     # Log that logging is configured
     logger = structlog.get_logger()
     logger.info("Logging configured", level=log_level_name, json_mode=use_json)
-
