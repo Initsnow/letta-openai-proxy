@@ -1,53 +1,64 @@
 # Letta OpenAI Proxy
 
-This project makes [Letta](https://docs.letta.com) agents available through an OpenAI-compatible API.  Agents are listed as models, and sending messages through the chat completion API will send messages to the selected Letta agent and receive reasoning messages.
+This project provides an OpenAI-compatible API for [Letta](https://docs.letta.com) agents, allowing you to use Letta agents with any OpenAI-compatible client (e.g., Open WebUI, LibreChat, or custom scripts).
 
-## Set up
 
-This project uses `uv` to run the application.  The usual uv methods apply:
+## Key Features
 
+- **OpenAI Compatibility**: Seamlessly integrates Letta agents into the OpenAI ecosystem.
+- **Dynamic Model Discovery**: Automatically lists your Letta agents as available models via the `/v1/models` endpoint.
+- **Streaming Support**: Real-time token streaming for a responsive chat experience.
+- **Tool Calling**: Full support for tool execution, including client-side tool execution via `ApprovalRequestMessage`.
+- **Reasoning Visualization**: Displays Letta's reasoning process (CoT) within `<think>` tags, compatible with modern UI clients.
+- **Image Support**: Support for multimodal inputs (images) in chat completions.
+- **Structured Logging**: High-quality observability using `structlog`.
+- **Haystack Integration**: Built on top of [Haystack](https://haystack.deepset.ai/) and [Hayhooks](https://github.com/deepset-ai/hayhooks) for a robust and extensible architecture.
+
+## Getting Started
+
+### Prerequisites
+
+- [uv](https://github.com/astral-sh/uv) for Python dependency management.
+- A running Letta server.
+
+### Setup
+
+1. **Sync dependencies**:
+   ```bash
+   uv sync
+   ```
+
+2. **Configure environment**:
+   Copy `env_example` to `.env` and set your Letta server details:
+   ```env
+   LETTA_BASE_URL=http://your-letta-server:8283
+   LETTA_API_TOKEN=your-letta-token (optional)
+   ```
+
+3. **Run the server**:
+   ```bash
+   uv run python app.py
+   ```
+   The proxy will be available at `http://localhost:1416`.
+
+## Usage
+
+### Listing Models
+The proxy dynamically fetches your Letta agents and presents them as OpenAI models:
+```bash
+curl http://localhost:1416/v1/models
 ```
-uv sync
-uv venv
-source .venv/bin/activate
-```
 
-You will need a letta server to run.  The easiest way to do this is to go to https://github.com/wsargent/groundedllm -- set up the tokens and run `docker compose up` to bring up the system.
+### Chatting with an Agent
+You can use any OpenAI client. Point the base URL to `http://localhost:1416/v1` and use the Letta Agent ID or Name as the model name.
 
-Copy the `env_example` to `.env` and set up your credentials:
-
-```
-LETTA_BASE_URL=http://your-letta-server
-
-LETTA_API_TOKEN=your-letta-password-if-any
-```
-
-## Running
-
-The server uses [Hayhooks](https://docs.haystack.deepset.ai/docs/hayhooks) to run:
-
-```
-uv run python app.py
-```
-
-The server will come up at http://localhost:1416
-
-Please see the Hayhooks documentation for logging and configuration options.
-
-## Using the Client
-
-You can use any OpenAI API compatible client to chat with the agent.  I prefer [Open WebUI](https://docs.openwebui.com) but there are many options.
-
-For your convenience, a simple command line client is included that you can run standalone:
-
-```
+#### CLI Client
+A simple CLI client is included for testing:
+```bash
 uv run python cli_client.py
 ```
+Type `/models` to see available agents and start chatting.
 
-And then type `/models` to list the available models.
+## Credits & Thanks
 
-Unfortunately, Apple's Terminal app doesn't support clickable hyperlinks: I recommend you use [iTerm2](https://iterm2.com) or another terminal that supports [OSC8](https://github.com/Alhadis/OSC8-Adoption) as it makes clicking on links much easier.  
-
-## Limitations
-
-You cannot use tools or upload data sources with an agent currently.
+Special thanks to **[wsargent](https://github.com/wsargent)** for the original implementation of the [letta-openai-proxy](https://github.com/wsargent/letta-openai-proxy), which served as the foundation for this project.
