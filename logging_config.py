@@ -39,12 +39,12 @@ def configure_logging() -> None:
     global _configured
     if _configured:
         return
-    _configured = True
 
     log_level = os.getenv("LOG", "INFO").upper()
 
-    # Remove hayhooks' default sink and ours if re-called
+    # Remove all existing sinks to ensure a clean state
     logger.remove()
+    _configured = True
 
     use_json = os.getenv("LOG_JSON", "false").lower() == "true"
     if use_json:

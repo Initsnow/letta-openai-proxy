@@ -153,8 +153,7 @@ class LettaChatGenerator:
         if streaming_callback is not None:
             try:
                 logger.info(f"Creating stream for agent_id: {agent_id}")
-                logger.debug(f"Request options: {self.request_options}")
-                logger.debug(f"Messages: {messages}")
+                logger.debug(f"Request timeout: {self.request_options.get('timeout')}")
 
                 stream_completion: Iterator[LettaStreamingResponse] = (
                     client.agents.messages.create(
@@ -594,7 +593,7 @@ class PipelineWrapper(BasePipelineWrapper):
         # The body argument contains the full request body, which may be used to extract more
         # information like the temperature or the max_tokens (see the OpenAI API reference for more information).
         logger.debug(
-            f"Running pipeline with model: {model}, messages: {messages}, body keys: {list(body.keys())}"
+            f"Running pipeline with model: {model}, body keys: {list(body.keys())}"
         )
 
         # Filter out OpenAI-specific parameters that might conflict with Letta

@@ -132,12 +132,18 @@ async def chat_completions_override(
             detail="Chat completions endpoint not implemented for 'letta_proxy' model.",
         )
 
+    letta_models = await run_in_threadpool(fetch_letta_models)
+    allowed_model_ids = [m["id"] for m in letta_models]
+    if chat_req.model not in allowed_model_ids:
+        logger.warning(f"Requested model '{chat_req.model}' not found or not allowed.")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{chat_req.model}' not found or not allowed.",
+        )
+
     request_body_dump = chat_req.model_dump()
     if "agent_id" not in request_body_dump:
         request_body_dump["agent_id"] = chat_req.model
-        logger.info(
-            f"Injected agent_id='{chat_req.model}' into request_body_dump for letta_proxy."
-        )
 
     try:
         result_generator = await run_in_threadpool(
@@ -278,7 +284,7 @@ async def chat_completions_override(
                 choices=[choice],
             )
             logger.debug(
-                f"Final ChatCompletion Response: {final_resp.model_dump_json()}"
+                f"Final ChatCompletion Response ID: {final_resp.id}, Model: {final_resp.model}"
             )
             return final_resp
         except Exception as e:
