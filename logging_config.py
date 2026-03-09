@@ -24,6 +24,9 @@ class _InterceptHandler(logging.Handler):
         )
 
 
+_configured = False
+
+
 def configure_logging() -> None:
     """
     Configure loguru as the single logging backend for the whole application.
@@ -33,6 +36,11 @@ def configure_logging() -> None:
       via InterceptHandler so everything appears in one unified stream.
     - Idempotent: safe to call multiple times.
     """
+    global _configured
+    if _configured:
+        return
+    _configured = True
+
     log_level = os.getenv("LOG", "INFO").upper()
 
     # Remove hayhooks' default sink and ours if re-called
@@ -58,5 +66,3 @@ def configure_logging() -> None:
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"):
         logging.getLogger(name).handlers = [_InterceptHandler()]
-
-    logger.info("Logging configured", level=log_level, json=use_json)

@@ -308,8 +308,10 @@ if __name__ == "__main__":
     _log_level = _os.getenv("LOG_LEVEL", "INFO").lower()
     # log_config=None: prevent uvicorn from calling dictConfig() which would
     # override our logging setup. log_level keeps uvicorn's own output in sync.
+    # Pass the 'hayhooks' instance directly (instead of "app:hayhooks" string)
+    # to prevent uvicorn from re-importing this module and executing create_app() twice.
     uvicorn.run(
-        "app:hayhooks",
+        hayhooks,
         host=settings.host,
         port=settings.port,
         log_config=None,
