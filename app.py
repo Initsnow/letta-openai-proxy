@@ -273,7 +273,7 @@ async def chat_completions_override(
             final_resp = ChatCompletion(
                 id=resp_id,
                 object="chat.completion",
-                created=int(time.time()),
+                created=created_at,
                 model=chat_req.model,
                 choices=[choice],
             )
