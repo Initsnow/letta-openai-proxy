@@ -65,6 +65,8 @@ class LettaChatGenerator:
         )
         # OPT-1: Cache the Letta client to avoid recreating it on every request.
         self._client: Optional[Letta] = None
+        self._client_tools_by_agent: Dict[str, List[ClientTool]] = {}
+        self._client_tools_by_call_id: Dict[str, List[ClientTool]] = {}
 
     @component.output_types(replies=List[ChatMessage], meta=List[Dict[str, Any]])
     def run(
@@ -143,8 +145,12 @@ class LettaChatGenerator:
                 ]
             }
 
-        # Convert OpenAI tools to Letta client_tools
-        client_tools = self._convert_tools_to_client_tools(tools) if tools else None
+        supplied_client_tools = self._convert_tools_to_client_tools(tools) if tools else None
+        client_tools = self._resolve_client_tools(
+            agent_id=agent_id,
+            supplied_client_tools=supplied_client_tools,
+            approval_message=approval_message,
+        )
         streaming_callback = select_streaming_callback(
             self.streaming_callback, streaming_callback, requires_async=False
         )
@@ -168,7 +174,12 @@ class LettaChatGenerator:
                 chunks = []
                 # BUG-1: Use local stream_state dict instead of self.think_block_open
                 # to be thread-safe across concurrent requests.
-                stream_state = {"think_block_open": False}
+                stream_state = {
+                    "think_block_open": False,
+                    "client_tools": client_tools,
+                    "client_tool_names": self._client_tool_names(client_tools),
+                    "tool_call_index": 0,
+                }
                 last_chunk = None
                 # Sometimes the response will time out while streaming, so we need a try / catch
                 try:
@@ -220,7 +231,7 @@ class LettaChatGenerator:
                     streaming=False,
                     timeout=self.request_options.get("timeout"),
                 )
-                completions = [self._build_message(agent_id, completion)]
+                completions = [self._build_message(agent_id, completion, client_tools)]
             except Exception as e:
                 logger.exception(
                     f"An error occurred while processing a response: {str(e)}"
@@ -260,6 +271,65 @@ class LettaChatGenerator:
                 }
                 client_tools.append(client_tool)
         return client_tools
+
+    @staticmethod
+    def _copy_client_tools(
+        client_tools: Optional[List[ClientTool]],
+    ) -> Optional[List[ClientTool]]:
+        if not client_tools:
+            return None
+
+        return [dict(tool) for tool in client_tools]  # type: ignore[list-item]
+
+    def _resolve_client_tools(
+        self,
+        agent_id: str,
+        supplied_client_tools: Optional[List[ClientTool]],
+        approval_message: Optional[ApprovalCreateParam],
+    ) -> Optional[List[ClientTool]]:
+        if supplied_client_tools:
+            copied_tools = self._copy_client_tools(supplied_client_tools)
+            if copied_tools:
+                self._client_tools_by_agent[agent_id] = copied_tools
+            return supplied_client_tools
+
+        if not approval_message:
+            return None
+
+        for approval in approval_message.get("approvals", []):
+            tool_call_id = approval.get("tool_call_id")
+            if tool_call_id and tool_call_id in self._client_tools_by_call_id:
+                return self._copy_client_tools(
+                    self._client_tools_by_call_id[tool_call_id]
+                )
+
+        return self._copy_client_tools(self._client_tools_by_agent.get(agent_id))
+
+    def _remember_client_tool_call(
+        self, tool_call_id: str, client_tools: Optional[List[ClientTool]]
+    ) -> None:
+        copied_tools = self._copy_client_tools(client_tools)
+        if copied_tools:
+            self._client_tools_by_call_id[tool_call_id] = copied_tools
+
+    @staticmethod
+    def _client_tool_names(client_tools: Optional[List[ClientTool]]) -> set[str]:
+        if not client_tools:
+            return set()
+
+        return {tool["name"] for tool in client_tools if tool.get("name")}
+
+    @staticmethod
+    def _tool_call_payload(tool_call: Any, index: int) -> Dict[str, Any]:
+        return {
+            "index": index,
+            "id": tool_call.tool_call_id,
+            "type": "function",
+            "function": {
+                "name": tool_call.name,
+                "arguments": tool_call.arguments,
+            },
+        }
 
     def _process_tool_input(
         self, prompt: Union[str, List]
@@ -423,8 +493,7 @@ class LettaChatGenerator:
             content = f"\n- {display_time} {reasoning}"
             return StreamingChunk(content=content_prefix + content, meta=meta_dict)
 
-        if isinstance(chunk, (ToolCallMessage, ApprovalRequestMessage)):
-            # Both ToolCallMessage and ApprovalRequestMessage contain a tool_call object
+        if isinstance(chunk, ToolCallMessage):
             tool_call = chunk.tool_call
 
             now = datetime.now()
@@ -432,12 +501,7 @@ class LettaChatGenerator:
             meta_dict = {"type": "assistant", "received_at": now.isoformat()}
             tool_name = tool_call.name
 
-            call_type = (
-                "Requesting approval for tool"
-                if isinstance(chunk, ApprovalRequestMessage)
-                else "Calling tool"
-            )
-            call_statement = f"{call_type} {tool_name}"
+            call_statement = f"Calling server tool {tool_name}"
 
             arguments: str = tool_call.arguments or "{}"
 
@@ -449,22 +513,46 @@ class LettaChatGenerator:
                 call_statement = call_statement + " with arguments: " + arguments
 
             content = f"\n- {display_time} {call_statement}..."
+            return StreamingChunk(content=content_prefix + content, meta=meta_dict)
 
-            tool_call_payload = {
-                "id": tool_call.tool_call_id,
-                "type": "function",
-                "function": {
-                    "name": tool_call.name,
-                    "arguments": tool_call.arguments,
-                },
-            }
-            logger.debug(
-                f"constructed tool_call_payload from {type(chunk).__name__}: {tool_call_payload}"
-            )
+        if isinstance(chunk, ApprovalRequestMessage):
+            tool_call = chunk.tool_call
 
-            # We use the 'meta' field to pass this structured data back to the pipeline runner (app.py)
-            meta_dict["tool_calls"] = [tool_call_payload]  # type: ignore[assignment]
+            now = datetime.now()
+            display_time = now.astimezone().time().isoformat("seconds")
+            meta_dict = {"type": "assistant", "received_at": now.isoformat()}
+            tool_name = tool_call.name
 
+            client_tool_names: set[str] = stream_state.get("client_tool_names", set())
+            is_client_tool = tool_name in client_tool_names
+
+            arguments: str = tool_call.arguments or "{}"
+
+            if is_client_tool:
+                tool_call_index = stream_state.get("tool_call_index", 0)
+                tool_call_payload = self._tool_call_payload(tool_call, tool_call_index)
+                stream_state["tool_call_index"] = tool_call_index + 1
+                self._remember_client_tool_call(
+                    tool_call.tool_call_id, stream_state.get("client_tools")
+                )
+                logger.debug(
+                    f"constructed client tool_call_payload from ApprovalRequestMessage: {tool_call_payload}"
+                )
+
+                # OpenAI clients execute client tools when they receive tool_calls.
+                meta_dict["tool_calls"] = [tool_call_payload]  # type: ignore[assignment]
+                meta_dict["finish_reason"] = "tool_calls"
+                return StreamingChunk(content="", meta=meta_dict)
+
+            call_statement = f"Server tool {tool_name} requires approval in Letta"
+            no_heartbeat_requested = """"request_heartbeat": false""" in arguments
+            if no_heartbeat_requested:
+                call_statement = call_statement + " *without heartbeat*"
+
+            if self._debug_tool_statements():
+                call_statement = call_statement + " with arguments: " + arguments
+
+            content = f"\n- {display_time} {call_statement}..."
             return StreamingChunk(content=content_prefix + content, meta=meta_dict)
 
         if isinstance(chunk, ToolReturnMessage):
@@ -491,7 +579,12 @@ class LettaChatGenerator:
 
         return None
 
-    def _build_message(self, agent_id: str, response: LettaResponse):
+    def _build_message(
+        self,
+        agent_id: str,
+        response: LettaResponse,
+        client_tools: Optional[List[ClientTool]] = None,
+    ):
         """
         Converts the response from Letta to a ChatMessage.
 
@@ -515,6 +608,7 @@ class LettaChatGenerator:
         chat_message = None
         assistant_content_parts: List[str] = []
         tool_call_index = 0
+        client_tool_names = self._client_tool_names(client_tools)
 
         for message in messages:
             if isinstance(message, AssistantMessage):
@@ -527,20 +621,20 @@ class LettaChatGenerator:
                 if content_str:
                     assistant_content_parts.append(content_str)
 
-            elif isinstance(message, ToolCallMessage):
+            elif isinstance(message, ApprovalRequestMessage):
                 tool_call = message.tool_call
+                is_client_tool = tool_call.name in client_tool_names
+
+                if not is_client_tool:
+                    assistant_content_parts.append(
+                        f"Server tool {tool_call.name} requires approval in Letta."
+                    )
+                    continue
 
                 # BUG-5: Use incrementing index so multiple tool calls are correctly indexed
-                tool_call_payload = {
-                    "index": tool_call_index,
-                    "id": tool_call.tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.name,
-                        "arguments": tool_call.arguments,
-                    },
-                }
+                tool_call_payload = self._tool_call_payload(tool_call, tool_call_index)
                 tool_call_index += 1
+                self._remember_client_tool_call(tool_call.tool_call_id, client_tools)
 
                 if not chat_message:
                     chat_message = ChatMessage.from_assistant("")

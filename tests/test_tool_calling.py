@@ -177,7 +177,22 @@ class MockStreamingChunk:
         return f"StreamingChunk(content={self.content}, meta={self.meta})"
 
 
+class MockChatMessage:
+    def __init__(self, content):
+        self._content = [content]
+        self.meta = {}
+
+    @classmethod
+    def from_assistant(cls, content):
+        return cls(content)
+
+    @property
+    def content(self):
+        return "".join(str(part) for part in self._content)
+
+
 sys.modules["haystack.dataclasses"].StreamingChunk = MockStreamingChunk
+sys.modules["haystack.dataclasses"].ChatMessage = MockChatMessage
 
 # Now we can import the module to test
 sys.path.append(
@@ -264,42 +279,56 @@ class TestToolCalling(unittest.TestCase):
             self.generator._process_tool_input([{"type": "text", "text": "hello"}])
         )
 
-    def test_process_streaming_chunk_tool_call(self):
-        # Mock ToolCallMessage
-        # We need to mock the structure expected by _process_streaming_chunk
-        # chunk is ToolCallMessage
-        # chunk.tool_call.name / arguments / tool_call_id
-
+    def test_process_streaming_chunk_server_tool_call_is_not_openai_tool_call(self):
         mock_tool_call = MagicMock()
         mock_tool_call.name = "get_weather"
         mock_tool_call.arguments = '{"location": "Paris"}'
         mock_tool_call.tool_call_id = "call_abc"
 
-        mock_message = MagicMock()
-        # Start matching types check
-        # isinstance(chunk, ToolCallMessage) must return True
-        # We need to make our mock_message an instance of the mocked ToolCallMessage class
-
-        # Reload the module to get the mocked class used in pipeline_wrapper
         from pipeline_wrapper import ToolCallMessage as MockToolCallMessageClass
 
-        # inherit to pass isinstance check
         class RealMockToolCallMessage(MockToolCallMessageClass):
             pass
 
         chunk = RealMockToolCallMessage()
         chunk.tool_call = mock_tool_call
 
-        # Mock datetime to ensure stable output?
-        # The method uses datetime.now(), so we can't easily assert exact string content without regex.
-        # But we can check meta["tool_calls"].
-
-        # BUG-1 fix: _process_streaming_chunk now requires a per-request stream_state dict
-        stream_state = {"think_block_open": False}
+        stream_state = {
+            "think_block_open": False,
+            "client_tool_names": {"get_weather"},
+            "tool_call_index": 0,
+        }
         result = self.generator._process_streaming_chunk(chunk, stream_state)
 
         self.assertIsNotNone(result)
+        self.assertNotIn("tool_calls", result.meta)
+        self.assertIn("Calling server tool get_weather", result.content)
+
+    def test_process_streaming_chunk_client_approval_request_becomes_tool_call(self):
+        mock_tool_call = MagicMock()
+        mock_tool_call.name = "get_weather"
+        mock_tool_call.arguments = '{"location": "Paris"}'
+        mock_tool_call.tool_call_id = "call_abc"
+
+        from pipeline_wrapper import ApprovalRequestMessage as MockApprovalRequestClass
+
+        class RealMockApprovalRequestMessage(MockApprovalRequestClass):
+            pass
+
+        chunk = RealMockApprovalRequestMessage()
+        chunk.tool_call = mock_tool_call
+
+        stream_state = {
+            "think_block_open": False,
+            "client_tool_names": {"get_weather"},
+            "tool_call_index": 0,
+        }
+        result = self.generator._process_streaming_chunk(chunk, stream_state)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.content, "")
         self.assertIn("tool_calls", result.meta)
+        self.assertEqual(result.meta["finish_reason"], "tool_calls")
         self.assertEqual(len(result.meta["tool_calls"]), 1)
         self.assertEqual(
             result.meta["tool_calls"][0]["function"]["name"], "get_weather"
@@ -309,6 +338,73 @@ class TestToolCalling(unittest.TestCase):
             '{"location": "Paris"}',
         )
         self.assertEqual(result.meta["tool_calls"][0]["id"], "call_abc")
+        self.assertEqual(result.meta["tool_calls"][0]["index"], 0)
+
+    def test_build_message_maps_client_approval_request_to_tool_calls(self):
+        mock_tool_call = MagicMock()
+        mock_tool_call.name = "get_weather"
+        mock_tool_call.arguments = '{"location": "Paris"}'
+        mock_tool_call.tool_call_id = "call_abc"
+
+        response = MockLettaResponse()
+        response.messages = [MockApprovalRequestMessage(tool_call=mock_tool_call)]
+        response.usage = MagicMock(
+            completion_tokens=1,
+            prompt_tokens=2,
+            total_tokens=3,
+        )
+
+        result = self.generator._build_message(
+            "agent-123",
+            response,
+            client_tools=[
+                {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {},
+                }
+            ],
+        )
+
+        self.assertEqual(result.meta["finish_reason"], "tool_calls")
+        self.assertEqual(len(result.meta["tool_calls"]), 1)
+        self.assertEqual(
+            result.meta["tool_calls"][0]["function"]["name"], "get_weather"
+        )
+        self.assertEqual(
+            self.generator._client_tools_by_call_id["call_abc"][0]["name"],
+            "get_weather",
+        )
+
+    def test_build_message_does_not_expose_server_approval_as_tool_call(self):
+        mock_tool_call = MagicMock()
+        mock_tool_call.name = "database_write"
+        mock_tool_call.arguments = '{"value": "x"}'
+        mock_tool_call.tool_call_id = "call_server"
+
+        response = MockLettaResponse()
+        response.messages = [MockApprovalRequestMessage(tool_call=mock_tool_call)]
+        response.usage = MagicMock(
+            completion_tokens=1,
+            prompt_tokens=2,
+            total_tokens=3,
+        )
+
+        result = self.generator._build_message(
+            "agent-123",
+            response,
+            client_tools=[
+                {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {},
+                }
+            ],
+        )
+
+        self.assertEqual(result.meta["finish_reason"], "stop")
+        self.assertNotIn("tool_calls", result.meta)
+        self.assertIn("database_write", result.content)
 
     def test_run_calls_create_with_tools(self):
         # Test that run() calls create with streaming=True and client_tools
@@ -343,6 +439,45 @@ class TestToolCalling(unittest.TestCase):
             self.assertIsNotNone(call_kwargs["client_tools"])
             self.assertEqual(len(call_kwargs["client_tools"]), 1)
             self.assertEqual(call_kwargs["client_tools"][0]["name"], "test_tool")
+
+    def test_run_reuses_client_tools_when_tool_result_has_no_tools(self):
+        self.generator.base_url = "http://test-url"
+        self.generator.token = MagicMock()
+        self.generator.token.resolve_value.return_value = "token"
+        self.generator._client_tools_by_call_id["call_abc"] = [
+            {
+                "name": "get_weather",
+                "description": "Get current weather",
+                "parameters": {},
+            }
+        ]
+
+        with patch("pipeline_wrapper.Letta") as MockLetta:
+            mock_client = MockLetta.return_value
+            mock_client.agents.messages.create.return_value = MockLettaResponse()
+            mock_client.agents.messages.create.return_value.messages = []
+            mock_client.agents.messages.create.return_value.usage = MagicMock(
+                completion_tokens=1,
+                prompt_tokens=2,
+                total_tokens=3,
+            )
+
+            self.generator.run(
+                prompt=[
+                    {
+                        "type": "tool_result",
+                        "tool_call_id": "call_abc",
+                        "content": "Sunny",
+                    }
+                ],
+                agent_id="agent-123",
+                tools=None,
+            )
+
+            mock_client.agents.messages.create.assert_called_once()
+            call_kwargs = mock_client.agents.messages.create.call_args[1]
+            self.assertEqual(call_kwargs["messages"][0]["type"], "approval")
+            self.assertEqual(call_kwargs["client_tools"][0]["name"], "get_weather")
 
 
 if __name__ == "__main__":

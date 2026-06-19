@@ -171,14 +171,19 @@ async def chat_completions_override(
 
     def stream_chunks() -> Generator[str, None, None]:
         try:
+            finish_reason = "stop"
             for chunk_content in result_generator:
                 tool_calls = None
                 content = ""
 
                 if isinstance(chunk_content, StreamingChunk):
                     content = chunk_content.content
+                    finish_reason = chunk_content.meta.get(
+                        "finish_reason", finish_reason
+                    )
                     if "tool_calls" in chunk_content.meta:
                         tool_calls = chunk_content.meta["tool_calls"]
+                        finish_reason = "tool_calls"
                 elif isinstance(chunk_content, str):
                     content = chunk_content
                 else:
@@ -212,7 +217,7 @@ async def chat_completions_override(
                     Choice(
                         index=0,
                         delta=Message(role="assistant", content=""),  # pyright: ignore[reportArgumentType]
-                        finish_reason="stop",
+                        finish_reason=finish_reason,  # type: ignore[arg-type]
                     )
                 ],
             )
