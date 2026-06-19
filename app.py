@@ -199,34 +199,36 @@ async def chat_completions_override(
                 if tool_calls:
                     msg_args["tool_calls"] = tool_calls
 
+                delta = Message.model_construct(**msg_args)  # type: ignore
+                choice = Choice.model_construct(index=0, delta=delta)
                 chunk_resp = ChatCompletion(
                     id=resp_id,
                     object="chat.completion.chunk",
                     created=created_at,
                     model=chat_req.model,
-                    choices=[Choice(index=0, delta=Message(**msg_args))],  # pyright: ignore[reportArgumentType]
+                    choices=[choice],
                 )
                 yield f"data: {chunk_resp.model_dump_json()}\n\n"
 
+            final_delta = Message.model_construct(role="assistant", content="")
+            final_choice = Choice.model_construct(
+                index=0,
+                delta=final_delta,
+                finish_reason=finish_reason,
+            )
             final_chunk = ChatCompletion(
                 id=resp_id,
                 object="chat.completion.chunk",
                 created=created_at,
                 model=chat_req.model,
-                choices=[
-                    Choice(
-                        index=0,
-                        delta=Message(role="assistant", content=""),  # pyright: ignore[reportArgumentType]
-                        finish_reason=finish_reason,  # type: ignore[arg-type]
-                    )
-                ],
+                choices=[final_choice],
             )
             yield f"data: {final_chunk.model_dump_json()}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             # BUG-7: Do NOT leak the error message as an AI reply.
             # Log the error and close the stream gracefully.
-            logger.error(f"Error during streaming from letta_proxy: {e}", exc_info=True)
+            logger.exception("Error during streaming from letta_proxy")
             yield "data: [DONE]\n\n"
 
     if chat_req.stream:
